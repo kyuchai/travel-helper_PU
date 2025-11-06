@@ -1,11 +1,11 @@
-gradio==3.41.0
-python-dotenv==1.0.0
-openai>=1.40.0
-langchain==0.2.15
-langchain-community==0.2.15
-langchain-openai==0.1.7
-faiss-cpu==1.11.0 ; python_version < "3.12"
-sentence-transformers==2.2.2
-numpy<2
-uvicorn
 fastapi
+uvicorn
+gradio
+openai
+langchain
+langchain-community
+langchain-openai
+faiss-cpu==1.11.0
+numpy<2
+python-dotenv
+sentence-transformers

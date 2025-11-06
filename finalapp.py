@@ -1,5 +1,8 @@
 # ================================
-# ✨ 旅遊小管家（FAISS + GPT + 語音，美化版，Render-ready）
+# 🧳 旅遊小管家（Render-ready：FastAPI + Uvicorn + Gradio）
+# - 0.0.0.0:$PORT 監聽
+# - 延遲載入 FAISS（避免冷啟動超時）
+# - 健康檢查 /health 極速回應
 # ================================
 import os
 import tempfile
@@ -11,42 +14,45 @@ from openai import OpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
-# ---------- 0) 基本設定 ----------
-api_key = os.environ.get("OPENAI_API_KEY")
-if not api_key:
-    raise ValueError("❌ 請先在環境變數設定 OPENAI_API_KEY")
+# ---------- 環境 ----------
+API_KEY = os.environ.get("OPENAI_API_KEY")
+if not API_KEY:
+    raise ValueError("❌ 請在環境變數設定 OPENAI_API_KEY")
 
-client = OpenAI(api_key=api_key)
-embedding_model = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=api_key)
+client = OpenAI(api_key=API_KEY)
+embedding_model = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=API_KEY)
 
-# 使用程式所在目錄為基準，避免工作目錄不同造成路徑錯誤
 BASE_DIR = Path(__file__).parent.resolve()
-faiss_db_path = BASE_DIR / "faiss1022_db"
+FAISS_DIR = BASE_DIR / "faiss1022_db"
 
-if not faiss_db_path.exists():
-    raise FileNotFoundError(f"❌ 找不到 FAISS 資料夾：{faiss_db_path}")
+# 延遲載入（冷啟動不碰磁碟）
+_db = None
+def get_db():
+    global _db
+    if _db is None:
+        if not FAISS_DIR.exists():
+            raise FileNotFoundError(f"❌ 找不到 FAISS 資料夾：{FAISS_DIR}")
+        _db = FAISS.load_local(
+            str(FAISS_DIR),
+            embedding_model,
+            allow_dangerous_deserialization=True
+        )
+        print(f"✅ 已載入 FAISS：{FAISS_DIR}")
+    return _db
 
-# 載入 FAISS（允許反序列化）
-db = FAISS.load_local(
-    str(faiss_db_path),
-    embedding_model,
-    allow_dangerous_deserialization=True
-)
-print(f"✅ 已成功載入 FAISS：{faiss_db_path}")
-
-# ---------- 1) 模型參數 ----------
 SYSTEM_PROMPT = (
     "你是一個友善的『旅遊小管家』，幫助使用者解答旅遊相關問題。"
     "如果資料不足或問題與旅遊無關，請回答：『我沒有這方面的資料哦～』"
 )
-CHAT_MODEL = "gpt-4o-mini"
+CHAT_MODEL  = "gpt-4o-mini"
 WHISPER_MODEL = "whisper-1"
-TTS_MODEL = "gpt-4o-mini-tts"
-TTS_VOICE = "alloy"
+TTS_MODEL   = "gpt-4o-mini-tts"
+TTS_VOICE   = "alloy"
 
-# ---------- 2) 功能 ----------
+# ---------- 功能 ----------
 def query_faiss(user_message: str, k: int = 1):
     try:
+        db = get_db()
         docs = db.similarity_search(user_message, k=k)
         return docs[0].page_content if docs else None
     except Exception as e:
@@ -62,7 +68,6 @@ def chat_with_openai(user_message, history):
     for q, a in history:
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
     messages.append({"role": "user", "content": user_message})
-
     if faiss_answer:
         messages.insert(0, {"role": "system", "content": f"資料庫資訊：\n{faiss_answer}"})
 
@@ -74,7 +79,7 @@ def chat_with_openai(user_message, history):
 
     history.append((user_message, reply))
 
-    # TTS（失敗不影響主流程）
+    # TTS：失敗不阻擋
     audio_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
@@ -99,44 +104,40 @@ def audio_to_text(audio_file, history):
         text = f"語音辨識失敗：{e}"
     return chat_with_openai(text, history)
 
-# ---------- 3) UI（Gradio Blocks） ----------
+# ---------- UI ----------
 custom_css = """
 body { background: linear-gradient(135deg,#f5f7fa,#c3cfe2); font-family:'Microsoft JhengHei',sans-serif; }
-.gradio-container { max-width: 900px !important; margin: auto; border-radius: 20px; box-shadow:0 0 25px rgba(0,0,0,0.1); background:white; }
+.gradio-container { max-width:900px !important; margin:auto; border-radius:20px; box-shadow:0 0 25px rgba(0,0,0,0.1); background:white; }
 h1,h2,h3 { text-align:center; color:#333; }
 button { border-radius:10px !important; font-weight:bold; transition:.2s; }
 button:hover { background-color:#4a90e2 !important; color:white !important; }
 """
 
 with gr.Blocks(title="🧳 旅遊小管家", css=custom_css, theme=gr.themes.Glass()) as demo:
-    gr.Markdown("""
-    # 🌏 旅遊小管家
-    請輸入文字或錄音提問，小管家會結合知識庫與 GPT 提供建議 ✈️
-    ---
-    """)
+    gr.Markdown("# 🌏 旅遊小管家\n輸入文字或語音提問，小管家會結合知識庫與 GPT 提供建議 ✈️\n---")
     chatbot = gr.Chatbot(label="💬 對話區", height=420)
     with gr.Row():
         msg = gr.Textbox(label="輸入問題", placeholder="例如：幫我安排台南兩天一夜行程", scale=3)
         send_btn = gr.Button("🚀 送出", variant="primary", scale=1)
     with gr.Column():
-        audio_in = gr.Audio(label="🎙️ 語音輸入（錄音或上傳）", type="filepath")
+        audio_in  = gr.Audio(label="🎙️ 語音輸入（錄音或上傳）", type="filepath")
         audio_out = gr.Audio(label="🔊 語音回覆", type="filepath")
     send_btn.click(chat_with_openai, [msg, chatbot], [msg, chatbot, audio_out])
     msg.submit(chat_with_openai, [msg, chatbot], [msg, chatbot, audio_out])
     audio_in.change(audio_to_text, [audio_in, chatbot], [msg, chatbot, audio_out])
 
-# ---------- 4) FastAPI + mount Gradio（Render 必備） ----------
+# ---------- FastAPI + 掛載 Gradio ----------
 app = FastAPI()
 
 @app.get("/health")
 def health():
+    # 不做重活，秒回 200，避免 Render 健檢失敗
     return {"status": "ok"}
 
-# 將 Gradio 掛在根路徑
+# 掛在根路徑
 app = gr.mount_gradio_app(app, demo, path="/")
 
-# 注意：在 Render 上用 uvicorn 啟動：
-# Start Command（Render 面板）請設為：
-#   uvicorn finalapp:app --host 0.0.0.0 --port $PORT
+# 在 Render：Start Command 請設為
+# uvicorn finalapp:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-keep-alive 120
 #
-# 不要在容器內再呼叫 demo.launch()（會阻塞/衝突）
+# 不要在程式內呼叫 demo.launch()；交給 uvicorn 啟動。
