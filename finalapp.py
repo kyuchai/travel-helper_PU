@@ -1,5 +1,9 @@
 # ================================
 # 🧳 旅遊小管家（Render-ready：FastAPI + Uvicorn + Gradio）
+# - 健康檢查 /health
+# - 延遲載入 FAISS（冷啟動更快）
+# - 自動偵測 *.faiss 與 index_name
+# - API Key 來源：環境變數 / Secret Files / .env
 # ================================
 import os
 import tempfile
@@ -11,50 +15,119 @@ from openai import OpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
-# ---------- 0) 讀取 API Key（優先環境變數，其次 .env） ----------
+# ---------- 0) 讀取 API Key（優先順序：Environment -> Secret File -> .env） ----------
 API_KEY = os.getenv("OPENAI_API_KEY")
+
 if not API_KEY:
     try:
-        # 本地開發用：自動讀取 .env（Render 不需要 .env）
-        from dotenv import load_dotenv
-        load_dotenv()
-        API_KEY = os.getenv("OPENAI_API_KEY")
+        with open("/etc/secrets/OPENAI_API_KEY", "r") as f:
+            API_KEY = f.read().strip()
+            print("✅ OPENAI_API_KEY loaded from /etc/secrets/OPENAI_API_KEY")
     except Exception:
         pass
 
 if not API_KEY:
-    # 這段訊息會出現在啟動日志，協助你快速排錯
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        API_KEY = os.getenv("OPENAI_API_KEY")
+        if API_KEY:
+            print("✅ OPENAI_API_KEY loaded from .env")
+    except Exception:
+        pass
+
+if not API_KEY:
     raise ValueError(
         "❌ 找不到 OPENAI_API_KEY。\n"
-        "請在 Render 的 Dashboard → Environment 里新增環境變數 OPENAI_API_KEY，\n"
-        "或在本地專案建立 .env 並寫入：\nOPENAI_API_KEY=sk-xxxxx"
+        "請在 Render → Environment Variables 新增 OPENAI_API_KEY=sk-xxxx，\n"
+        "或使用 Secret Files 檔名 OPENAI_API_KEY。"
     )
 
-# OpenAI & Embedding
+# OpenAI Client & Embedding
 client = OpenAI(api_key=API_KEY)
 embedding_model = OpenAIEmbeddings(
     model="text-embedding-3-small",
     openai_api_key=API_KEY,
 )
 
-# ---------- 1) FAISS 路徑（允許用環境變數覆寫） ----------
+# ---------- 1) FAISS 路徑與自動偵測 ----------
 BASE_DIR = Path(__file__).parent.resolve()
+# 可用環境變數 FAISS_DIR 覆寫索引目錄；預設使用 repo 根下的 faiss1022_db
 FAISS_DIR = Path(os.getenv("FAISS_DIR", BASE_DIR / "faiss1022_db"))
 
-# 延遲載入，避免冷啟動太久/找不到路徑立即崩潰
+def _print_tree(root: Path, max_depth=2, prefix=""):
+    """列出專案樹（前兩層）方便在 Render logs 排錯。"""
+    try:
+        if max_depth < 0 or not root.exists():
+            return
+        for e in sorted(root.iterdir()):
+            print(f"{prefix}{'📁' if e.is_dir() else '📄'} {e.relative_to(BASE_DIR)}")
+            if e.is_dir():
+                _print_tree(e, max_depth - 1, prefix + "   ")
+    except Exception as e:
+        print(f"⚠️ 列印目錄失敗: {e}")
+
+print("📍 專案根目錄：", BASE_DIR)
+_print_tree(BASE_DIR, max_depth=2)
+
+def _detect_faiss_location():
+    """尋找專案中的 *.faiss，並回傳 (索引所在資料夾, index_name)。"""
+    candidates = []
+    # 先掃指定資料夾
+    if FAISS_DIR.exists():
+        candidates.extend(FAISS_DIR.rglob("*.faiss"))
+    # 找不到就全專案掃描
+    if not candidates:
+        candidates.extend(BASE_DIR.rglob("*.faiss"))
+
+    if not candidates:
+        raise FileNotFoundError(
+            "❌ 專案中找不到任何 *.faiss 檔案。\n"
+            "請確認索引檔（通常是 index.faiss / index.pkl）已提交到 repo，"
+            "或正確設定環境變數 FAISS_DIR 指向索引資料夾。"
+        )
+
+    faiss_file = sorted(candidates)[0]
+    index_dir = faiss_file.parent
+    index_name = faiss_file.stem  # 例如 index.faiss -> index
+
+    print(f"🔍 偵測到 FAISS 檔：{faiss_file}")
+    print(f"🔍 使用 index_name：{index_name}")
+    print(f"🔍 index 目錄：{index_dir}")
+
+    # 檢查是否為 Git LFS 指標檔（大小極小且含 git-lfs 字樣）
+    try:
+        if faiss_file.stat().st_size < 1024:
+            txt = faiss_file.read_text(errors="ignore")[:200]
+            if "git-lfs" in txt:
+                raise RuntimeError(
+                    "❌ 這是 Git LFS 指標檔，非實體索引。請確認 LFS 已正確上傳並被 Render 抓到實檔。"
+                )
+    except UnicodeDecodeError:
+        # 二進位正常
+        pass
+
+    # pkl 檔也順便檢查一下（非必需，但有助於 metadata）
+    pkl = index_dir / f"{index_name}.pkl"
+    if not pkl.exists():
+        print(f"⚠️ 注意：{pkl.name} 不存在，若缺少 metadata 可能影響載入（非必須）。")
+
+    return index_dir, index_name
+
+# 延遲載入（第一次查詢時才讀檔）
 _db = None
 def get_db():
-    """延遲載入 FAISS 向量庫（第一次查詢時再讀檔）"""
     global _db
-    if _db is None:
-        if not FAISS_DIR.exists():
-            raise FileNotFoundError(f"❌ 找不到 FAISS 資料夾：{FAISS_DIR}")
-        _db = FAISS.load_local(
-            str(FAISS_DIR),
-            embedding_model,
-            allow_dangerous_deserialization=True
-        )
-        print(f"✅ 已載入 FAISS：{FAISS_DIR}")
+    if _db is not None:
+        return _db
+    index_dir, index_name = _detect_faiss_location()
+    _db = FAISS.load_local(
+        str(index_dir),
+        embedding_model,
+        index_name=index_name,            # 自動帶入檔名（去副檔名）
+        allow_dangerous_deserialization=True
+    )
+    print("✅ FAISS 向量庫載入成功")
     return _db
 
 # ---------- 2) 模型設定 ----------
@@ -99,7 +172,7 @@ def chat_with_openai(user_message, history):
 
     history.append((user_message, reply))
 
-    # TTS（失敗不阻擋）
+    # TTS（失敗不阻擋主流程）
     audio_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
