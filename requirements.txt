@@ -1,11 +1,9 @@
-gradio==4.44.0
-langchain==0.2.1
-langchain-core==0.2.0
-langchain-community==0.2.0
-langchain-openai==0.2.1
-openai==1.36.1
-faiss-cpu==1.8.0
-sentence-transformers==3.0.0
-pypdf==4.2.0
-python-docx==1.1.0
-python-dotenv==1.0.1
+gradio==3.41.0
+python-dotenv==1.0.0
+openai>=1.35.7
+langchain==0.1.0
+langchain-community==0.0.189
+langchain-openai==0.0.17
+faiss-cpu==1.11.0 ; python_version < "3.12"
+sentence-transformers==2.2.2
+numpy<2
