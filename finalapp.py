@@ -1,7 +1,7 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🧳 旅遊小管家 Pro（修正版：穩定匯出；科技風 UI；固定 GPT TTS；中文語言標示；Render/uvicorn）
+# 🧳 旅遊小管家 Pro（修正版 v2：修正 _id 錯誤；穩定匯出；科技風 UI；固定 GPT TTS；中文語言標示；Render/uvicorn）
 # ==========================================
 import os
 import tempfile
@@ -128,8 +128,8 @@ def export_chat(history):
         f.write(content)
     return path
 
-def clear_history():
-    return []
+def clear_history_both():
+    return [], []
 
 def noop_return_none(*args, **kwargs):
     return None
@@ -271,14 +271,16 @@ with gr.Blocks(title="旅遊小管家 Pro（科技風）", css=CSS_TECH) as demo
 
     # ================= 綁定事件 =================
     # 文字聊天（回傳 chatbot 與 history_state）
-    send_btn.click(on_send_text, [user_text, chatbot, voice_dropdown, system_prompt_tb],
-                   [chatbot, "state", user_text, tts_output, transcript_tb])
-    clear_btn.click(clear_history, None, [chatbot])
+    send_btn.click(on_send_text, [user_text, history_state, voice_dropdown, system_prompt_tb],
+                   [chatbot, history_state, user_text, tts_output, transcript_tb])
+
+    # 清空：同時清 chatbot 與 state
+    clear_btn.click(clear_history_both, None, [chatbot, history_state])
 
     # 錄音決策流程（同樣同步 history_state）
     preview_btn.click(on_preview_voice, [mic_audio, whisper_lang_dd], [pending_box, pending_box, tts_output])
-    send_voice_btn.click(on_send_voice, [mic_audio, pending_box, chatbot, voice_dropdown, system_prompt_tb],
-                         [chatbot, "state", tts_output, pending_box, pending_box, mic_audio])
+    send_voice_btn.click(on_send_voice, [mic_audio, pending_box, history_state, voice_dropdown, system_prompt_tb],
+                         [chatbot, history_state, tts_output, pending_box, pending_box, mic_audio])
     cancel_pending_btn.click(on_clear_pending, inputs=[pending_box], outputs=[pending_box, pending_box, mic_audio])
     redo_btn.click(clear_audio, [mic_audio], [mic_audio])
     drop_btn.click(clear_audio, [mic_audio], [mic_audio])
