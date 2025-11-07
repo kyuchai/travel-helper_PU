@@ -96,7 +96,7 @@ def on_send_audio(audio_file, history, voice_name, tts_model, whisper_lang, syst
         return history, None, None, gr.update(visible=True), gr.update(visible=True), ""
     text = transcribe_audio_to_text(audio_file, whisper_lang)
     bot_text = chat_answer(text, system_prompt)
-    history = (history or []) + [(f"(語音轉文字)\n{text}", bot_text)]
+    history = (history or []) + [(f"(語音轉文字)\\n{text}", bot_text)]
     audio_path = text_to_speech(bot_text, voice_name, tts_model)
     return history, None, audio_path, gr.update(visible=True), gr.update(visible=True), text
 
@@ -167,11 +167,13 @@ def noop_return_none(*args, **kwargs):
 with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as demo:
     gr.Markdown("## 🧳 旅遊小管家 Pro\\n支援語音輸入、回覆語音、**語音切換**與**偏好記憶**，並能調整**播放速度**與**音量**、匯出對話。")
 
+    # 對話區
     chatbot = gr.Chatbot(label="對話區")
     with gr.Row():
         user_text = gr.Textbox(placeholder="輸入文字或使用語音...", label="文字訊息", scale=4)
         send_btn = gr.Button("送出文字", variant="primary", scale=1)
 
+    # 語音相關設定
     with gr.Row():
         voice_dropdown = gr.Dropdown(choices=VOICE_CHOICES, value="alloy", label="語音包（TTS 聲音）", scale=2)
         tts_model_dd = gr.Dropdown(choices=TTS_MODEL_CHOICES, value="gpt-4o-mini-tts", label="TTS 模型", scale=1)
@@ -182,6 +184,7 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
         playback_rate_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="播放速度")
         volume_slider = gr.Slider(minimum=0.0, maximum=1.0, value=1.0, step=0.05, label="音量")
 
+    # System prompt（可記憶）
     system_prompt_tb = gr.Textbox(
         value=DEFAULT_SYSTEM_PROMPT,
         label="系統提示詞（System Prompt）",
@@ -189,9 +192,11 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
         placeholder="可自訂小管家的語氣與行為（此設定會被記住）"
     )
 
+    # 回覆語音與辨識文字顯示
     tts_output = gr.Audio(label="🔊 回覆語音", type="filepath", interactive=False)
     transcript_tb = gr.Textbox(label="🎧 語音辨識文字（使用者錄音）", interactive=False)
 
+    # 語音輸入區（可預聽/重錄/刪除）
     gr.Markdown("### 🎤 語音輸入（錄完可預聽，滿意再送出；或刪除／重錄）")
     mic_audio = gr.Audio(sources=["microphone", "upload"], type="filepath", label="錄音後可預聽、重錄或刪除")
     with gr.Row():
@@ -199,12 +204,15 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
         delete_audio_btn = gr.Button("🗑️ 刪除音訊")
         rerecord_btn = gr.Button("🔁 重新錄製")
 
+    # 工具列
     with gr.Row():
         export_btn = gr.Button("📝 匯出對話（.txt）")
         clear_btn = gr.Button("🧹 清空對話")
 
+    # 隱藏 dummy
     dummy_store = gr.Textbox(visible=False)
 
+    # ---- 事件：聊天 ----
     send_btn.click(
         on_send_text,
         inputs=[user_text, chatbot, voice_dropdown, tts_model_dd, system_prompt_tb],
@@ -218,10 +226,13 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
     delete_audio_btn.click(clear_audio, inputs=[mic_audio], outputs=[mic_audio, delete_audio_btn, rerecord_btn])
     rerecord_btn.click(clear_audio, inputs=[mic_audio], outputs=[mic_audio, delete_audio_btn, rerecord_btn])
 
+    # ---- 事件：匯出與清除 ----
     export_file = gr.File(label="下載檔案", visible=True)
     export_btn.click(export_chat, inputs=[chatbot], outputs=[export_file])
     clear_btn.click(clear_history, inputs=None, outputs=[chatbot])
 
+    # ---- 事件：記住使用者偏好（localStorage）----
+    # 語音包
     voice_dropdown.change(
         fn=noop_return_none, inputs=[voice_dropdown], outputs=[dummy_store],
         _js="(v)=>{ try{localStorage.setItem('voice_choice', v);}catch(e){}; return null; }"
@@ -230,7 +241,7 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
         fn=lambda: "alloy", inputs=None, outputs=[voice_dropdown],
         _js="()=>{ try{const v=localStorage.getItem('voice_choice'); return v||'alloy';}catch(e){return 'alloy';} }"
     )
-
+    # TTS 模型
     tts_model_dd.change(
         fn=noop_return_none, inputs=[tts_model_dd], outputs=[dummy_store],
         _js="(v)=>{ try{localStorage.setItem('tts_model', v);}catch(e){}; return null; }"
@@ -239,7 +250,7 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
         fn=lambda: "gpt-4o-mini-tts", inputs=None, outputs=[tts_model_dd],
         _js="()=>{ try{const v=localStorage.getItem('tts_model'); return v||'gpt-4o-mini-tts';}catch(e){return 'gpt-4o-mini-tts';} }"
     )
-
+    # Whisper 語言
     whisper_lang_dd.change(
         fn=noop_return_none, inputs=[whisper_lang_dd], outputs=[dummy_store],
         _js="(v)=>{ try{localStorage.setItem('whisper_lang', v);}catch(e){}; return null; }"
@@ -248,7 +259,7 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
         fn=lambda: "auto", inputs=None, outputs=[whisper_lang_dd],
         _js="()=>{ try{const v=localStorage.getItem('whisper_lang'); return v||'auto';}catch(e){return 'auto';} }"
     )
-
+    # 自動播放
     autoplay_chk.change(
         fn=noop_return_none, inputs=[autoplay_chk], outputs=[dummy_store],
         _js="(v)=>{ try{localStorage.setItem('voice_autoplay', v ? 'true':'false');}catch(e){}; return null; }"
@@ -257,7 +268,7 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
         fn=lambda: True, inputs=None, outputs=[autoplay_chk],
         _js="()=>{ try{const v=localStorage.getItem('voice_autoplay'); return v===null? true : (v==='true');}catch(e){return true;} }"
     )
-
+    # 播放速度
     playback_rate_slider.change(
         fn=noop_return_none, inputs=[playback_rate_slider], outputs=[dummy_store],
         _js="(v)=>{ try{localStorage.setItem('voice_playback_rate', String(v));}catch(e){}; return null; }"
@@ -266,7 +277,7 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
         fn=lambda: 1.0, inputs=None, outputs=[playback_rate_slider],
         _js="()=>{ try{const v=parseFloat(localStorage.getItem('voice_playback_rate')); return isNaN(v)?1.0:v;}catch(e){return 1.0;} }"
     )
-
+    # 音量
     volume_slider.change(
         fn=noop_return_none, inputs=[volume_slider], outputs=[dummy_store],
         _js="(v)=>{ try{localStorage.setItem('voice_volume', String(v));}catch(e){}; return null; }"
@@ -275,16 +286,29 @@ with gr.Blocks(title="旅遊小管家 Pro（語音互動＋記憶偏好）") as 
         fn=lambda: 1.0, inputs=None, outputs=[volume_slider],
         _js="()=>{ try{const v=parseFloat(localStorage.getItem('voice_volume')); return isNaN(v)?1.0:v;}catch(e){return 1.0;} }"
     )
-
-    system_prompt_tb.change(
-        fn=noop_return_none, inputs=[system_prompt_tb], outputs=[dummy_store],
-        _js="(v)=>{ try{localStorage.setItem('system_prompt', v);}catch(e){}; return null; }"
+    # System Prompt：兩段式，避免 f-string 與 JS 大括號衝突
+    demo.load(
+        fn=lambda: DEFAULT_SYSTEM_PROMPT,
+        inputs=None,
+        outputs=[system_prompt_tb],
     )
     demo.load(
-        fn=lambda: DEFAULT_SYSTEM_PROMPT, inputs=None, outputs=[system_prompt_tb],
-        _js=f\"()=>{{ try{{const v=localStorage.getItem('system_prompt'); return v||{DEFAULT_SYSTEM_PROMPT!r};}}catch(e){{return {DEFAULT_SYSTEM_PROMPT!r};}} }}\"
+        fn=lambda: None,
+        inputs=None,
+        outputs=[system_prompt_tb],
+        _js="""
+            () => {
+                try {
+                    const v = localStorage.getItem('system_prompt');
+                    return (v !== null) ? v : undefined;
+                } catch (e) {
+                    return undefined;
+                }
+            }
+        """,
     )
 
+    # 當音檔變更時套用偏好並自動播放
     tts_output.change(
         fn=noop_return_none,
         inputs=[tts_output],
