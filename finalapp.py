@@ -1,7 +1,7 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🧳 旅遊小管家 Pro（科技風 UI；固定 GPT TTS；中文語言標示；Render/uvicorn 版）
+# 🧳 旅遊小管家 Pro（修正版：穩定匯出；科技風 UI；固定 GPT TTS；中文語言標示；Render/uvicorn）
 # ==========================================
 import os
 import tempfile
@@ -77,12 +77,12 @@ def text_to_speech(text: str, voice_name: str):
         response.stream_to_file(speech_file_path)
     return speech_file_path
 
-# ---- Chat events
+# ---- Chat events（回傳 history 與 history_state）
 def on_send_text(msg, history, voice_name, system_prompt):
     bot_text = chat_answer(msg, system_prompt)
     history = (history or []) + [(msg, bot_text)]
     audio_path = text_to_speech(bot_text, voice_name)
-    return history, "", audio_path, bot_text
+    return history, history, "", audio_path, bot_text
 
 # ---- Voice decision flow
 def on_preview_voice(audio_file, whisper_lang_label):
@@ -98,11 +98,11 @@ def on_send_voice(audio_file, pending_text, history, voice_name, system_prompt):
     if not text and audio_file:
         text = transcribe_audio_to_text(audio_file, "auto")
     if not text:
-        return history, None, "", gr.update(visible=False), None
+        return history, history, None, "", gr.update(visible=False), None
     bot_text = chat_answer(text, system_prompt)
     history = (history or []) + [(f"(語音轉文字)\\n{text}", bot_text)]
     audio_path = text_to_speech(bot_text, voice_name)
-    return history, audio_path, "", gr.update(visible=False), None
+    return history, history, audio_path, "", gr.update(visible=False), None
 
 def on_clear_pending(_):
     """取消/重錄：清空暫存區"""
@@ -129,7 +129,7 @@ def export_chat(history):
     return path
 
 def clear_history():
-    return None
+    return []
 
 def noop_return_none(*args, **kwargs):
     return None
@@ -192,6 +192,7 @@ with gr.Blocks(title="旅遊小管家 Pro（科技風）", css=CSS_TECH) as demo
         # =============== 左：聊天區 ===============
         with gr.Column(scale=3, elem_classes=["neon-panel"]):
             chatbot = gr.Chatbot(label="對話區", height=520)
+            history_state = gr.State([])
 
             with gr.Row():
                 user_text = gr.Textbox(placeholder="輸入文字...", label="文字訊息", lines=2)
@@ -238,7 +239,6 @@ with gr.Blocks(title="旅遊小管家 Pro（科技風）", css=CSS_TECH) as demo
             with gr.Row():
                 voice_dropdown = gr.Dropdown(choices=VOICE_CHOICES, value="alloy", label="語音包")
                 whisper_lang_dd = gr.Dropdown(choices=LANG_CHOICES, value="auto", label="Whisper 語言")
-
             system_prompt_tb = gr.Textbox(value=DEFAULT_SYSTEM_PROMPT, label="System Prompt（系統提示詞）", lines=3)
 
             # 偏好 localStorage
@@ -270,27 +270,21 @@ with gr.Blocks(title="旅遊小管家 Pro（科技風）", css=CSS_TECH) as demo
     gr.Markdown("— 提醒：第一次使用請先點『取得麥克風權限』；HTTPS 網址才能開啟麥克風。")
 
     # ================= 綁定事件 =================
-    # 文字聊天
+    # 文字聊天（回傳 chatbot 與 history_state）
     send_btn.click(on_send_text, [user_text, chatbot, voice_dropdown, system_prompt_tb],
-                   [chatbot, user_text, tts_output, transcript_tb])
+                   [chatbot, "state", user_text, tts_output, transcript_tb])
     clear_btn.click(clear_history, None, [chatbot])
 
-    # 錄音決策流程
-    mic_permission_btn.click(fn=lambda: "請查看瀏覽器權限視窗", inputs=None, outputs=[mic_status], _js="""
-        () => {
-          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { return 'unsupported'; }
-          return navigator.mediaDevices.getUserMedia({audio:true}).then(()=>'granted').catch(()=> 'denied');
-        }
-    """)
+    # 錄音決策流程（同樣同步 history_state）
     preview_btn.click(on_preview_voice, [mic_audio, whisper_lang_dd], [pending_box, pending_box, tts_output])
     send_voice_btn.click(on_send_voice, [mic_audio, pending_box, chatbot, voice_dropdown, system_prompt_tb],
-                         [chatbot, tts_output, pending_box, pending_box, mic_audio])
+                         [chatbot, "state", tts_output, pending_box, pending_box, mic_audio])
     cancel_pending_btn.click(on_clear_pending, inputs=[pending_box], outputs=[pending_box, pending_box, mic_audio])
     redo_btn.click(clear_audio, [mic_audio], [mic_audio])
     drop_btn.click(clear_audio, [mic_audio], [mic_audio])
 
-    # 匯出
-    export_btn.click(export_chat, [chatbot], [export_file])
+    # 匯出：改用 state（避免某些版本下 component 傳遞失敗）
+    export_btn.click(export_chat, [history_state], [export_file])
 
     # 回覆語音自動播放（偏好：voice_autoplay）
     tts_output.change(fn=noop_return_none, inputs=[tts_output], outputs=[dummy_store],
