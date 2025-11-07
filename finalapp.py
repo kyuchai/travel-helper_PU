@@ -1,7 +1,7 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🧳 旅遊小管家 Pro（修正版 v2：修正 _id 錯誤；穩定匯出；科技風 UI；固定 GPT TTS；中文語言標示；Render/uvicorn）
+# 🧳 旅遊小管家 Pro（修正版 v3：移除多餘 load 造成 Error；單一 load 初始化；穩定匯出）
 # ==========================================
 import os
 import tempfile
@@ -24,10 +24,8 @@ VOICE_CHOICES = [
     "fable", "nova", "onyx", "sage", "shimmer", "verse",
 ]
 
-# 固定使用 GPT 的 TTS（無下拉選項）
 FIXED_TTS_MODEL = "gpt-4o-mini-tts"
 
-# Whisper 語言：介面顯示中文（後方括號顯示代碼），auto 無括號
 LANG_CHOICES = [
     "auto",
     "中文(zh)", "英文(en)", "泰文(th)", "日文(ja)", "韓文(ko)",
@@ -86,14 +84,12 @@ def on_send_text(msg, history, voice_name, system_prompt):
 
 # ---- Voice decision flow
 def on_preview_voice(audio_file, whisper_lang_label):
-    """錄音完成後 → 轉成文字，只顯示在『尚未送出』區，等待使用者決策。"""
     if not audio_file:
         return "", gr.update(visible=False), None
     text = transcribe_audio_to_text(audio_file, whisper_lang_label)
     return text, gr.update(visible=True), None
 
 def on_send_voice(audio_file, pending_text, history, voice_name, system_prompt):
-    """使用者按『送出』後 → 將 pending_text 當作使用者訊息送去聊天"""
     text = (pending_text or "").strip()
     if not text and audio_file:
         text = transcribe_audio_to_text(audio_file, "auto")
@@ -105,7 +101,6 @@ def on_send_voice(audio_file, pending_text, history, voice_name, system_prompt):
     return history, history, audio_path, "", gr.update(visible=False), None
 
 def on_clear_pending(_):
-    """取消/重錄：清空暫存區"""
     return "", gr.update(visible=False), None
 
 def clear_audio(_):
@@ -157,30 +152,20 @@ hr{border-color:#1c2947;}
 .badge{display:inline-block; padding:4px 10px; border:1px solid var(--stroke); border-radius:999px; color:var(--muted); font-size:12px}
 """
 
-JS_APPLY_AUDIO_PREFS_AND_AUTOPLAY = """
-(audio_path)=>{
-  try{
-    const audios = document.querySelectorAll('audio');
-    const audio = audios[audios.length-1];
-    if(!audio) return null;
-    const auto = (localStorage.getItem('voice_autoplay')||'true')==='true';
-    if(auto){ const p = audio.play(); if(p && p.catch) p.catch(()=>{}); }
-  }catch(e){}
-  return null;
+JS_INIT_FROM_LOCALSTORAGE = """
+() => {
+  try {
+    const v1 = localStorage.getItem('voice_choice') || 'alloy';
+    const v2 = localStorage.getItem('whisper_lang_label') || 'auto';
+    const v3 = localStorage.getItem('system_prompt'); // 可能為 null
+    return [v1, v2, (v3!==null)? v3 : undefined];
+  } catch (e) {
+    return ['alloy', 'auto', undefined];
+  }
 }
 """
 
-JS_REQUEST_MIC_PERMISSION = """
-() => {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    alert('此瀏覽器不支援麥克風權限 API');
-    return 'unsupported';
-  }
-  return navigator.mediaDevices.getUserMedia({audio:true})
-    .then(()=>'granted')
-    .catch(()=> 'denied');
-}
-"""
+JS_SAVE_LOCALSTORAGE = "(key)=> (val)=>{ try{ localStorage.setItem(key, val); }catch(e){} return null; }"
 
 # -------------------------
 # Gradio 介面
@@ -241,43 +226,25 @@ with gr.Blocks(title="旅遊小管家 Pro（科技風）", css=CSS_TECH) as demo
                 whisper_lang_dd = gr.Dropdown(choices=LANG_CHOICES, value="auto", label="Whisper 語言")
             system_prompt_tb = gr.Textbox(value=DEFAULT_SYSTEM_PROMPT, label="System Prompt（系統提示詞）", lines=3)
 
-            # 偏好 localStorage
+            # 偏好 localStorage：變更時保存
             dummy_store = gr.Textbox(visible=False)
-
-            # 語音包記憶
             voice_dropdown.change(fn=noop_return_none, inputs=[voice_dropdown], outputs=[dummy_store],
-                                  _js="(v)=>{ try{localStorage.setItem('voice_choice', v);}catch(e){}; return null; }")
-            demo.load(fn=lambda:"alloy", inputs=None, outputs=[voice_dropdown],
-                      _js="()=>{ try{const v=localStorage.getItem('voice_choice'); return v||'alloy';}catch(e){return 'alloy';} }")
-
-            # Whisper 語言記憶（以中文標籤存放即可）
+                                  _js="(%s)('voice_choice')" % JS_SAVE_LOCALSTORAGE)
             whisper_lang_dd.change(fn=noop_return_none, inputs=[whisper_lang_dd], outputs=[dummy_store],
-                                   _js="(v)=>{ try{localStorage.setItem('whisper_lang_label', v);}catch(e){}; return null; }")
-            demo.load(fn=lambda:"auto", inputs=None, outputs=[whisper_lang_dd],
-                      _js="()=>{ try{const v=localStorage.getItem('whisper_lang_label'); return v||'auto';}catch(e){return 'auto';} }")
+                                   _js="(%s)('whisper_lang_label')" % JS_SAVE_LOCALSTORAGE)
+            system_prompt_tb.change(fn=noop_return_none, inputs=[system_prompt_tb], outputs=[dummy_store],
+                                    _js="(%s)('system_prompt')" % JS_SAVE_LOCALSTORAGE)
 
-            # System prompt：兩段式，避免 f-string 衝突
-            demo.load(fn=lambda: DEFAULT_SYSTEM_PROMPT, inputs=None, outputs=[system_prompt_tb])
-            demo.load(
-                fn=lambda: None, inputs=None, outputs=[system_prompt_tb],
-                _js="()=>{ try{const v=localStorage.getItem('system_prompt'); return (v!==null)?v:undefined;}catch(e){return undefined;} }"
-            )
-            system_prompt_tb.change(
-                fn=noop_return_none, inputs=[system_prompt_tb], outputs=[dummy_store],
-                _js="(v)=>{ try{localStorage.setItem('system_prompt', v);}catch(e){}; return null; }"
-            )
-
-    gr.Markdown("— 提醒：第一次使用請先點『取得麥克風權限』；HTTPS 網址才能開啟麥克風。")
+    gr.Markdown("— 提醒：HTTPS 網址才能開啟麥克風。")
 
     # ================= 綁定事件 =================
     # 文字聊天（回傳 chatbot 與 history_state）
     send_btn.click(on_send_text, [user_text, history_state, voice_dropdown, system_prompt_tb],
                    [chatbot, history_state, user_text, tts_output, transcript_tb])
 
-    # 清空：同時清 chatbot 與 state
     clear_btn.click(clear_history_both, None, [chatbot, history_state])
 
-    # 錄音決策流程（同樣同步 history_state）
+    # 錄音決策流程
     preview_btn.click(on_preview_voice, [mic_audio, whisper_lang_dd], [pending_box, pending_box, tts_output])
     send_voice_btn.click(on_send_voice, [mic_audio, pending_box, history_state, voice_dropdown, system_prompt_tb],
                          [chatbot, history_state, tts_output, pending_box, pending_box, mic_audio])
@@ -285,12 +252,23 @@ with gr.Blocks(title="旅遊小管家 Pro（科技風）", css=CSS_TECH) as demo
     redo_btn.click(clear_audio, [mic_audio], [mic_audio])
     drop_btn.click(clear_audio, [mic_audio], [mic_audio])
 
-    # 匯出：改用 state（避免某些版本下 component 傳遞失敗）
+    # 匯出
     export_btn.click(export_chat, [history_state], [export_file])
 
-    # 回覆語音自動播放（偏好：voice_autoplay）
-    tts_output.change(fn=noop_return_none, inputs=[tts_output], outputs=[dummy_store],
-                      _js=JS_APPLY_AUDIO_PREFS_AND_AUTOPLAY)
+    # 單一 load：從 localStorage 初始化三個值（避免多個 load 造成 Error）
+    demo.load(fn=lambda: None, inputs=None, outputs=[voice_dropdown, whisper_lang_dd, system_prompt_tb],
+              _js="""
+                  () => {
+                    try {
+                      const v1 = localStorage.getItem('voice_choice') || 'alloy';
+                      const v2 = localStorage.getItem('whisper_lang_label') || 'auto';
+                      const v3 = localStorage.getItem('system_prompt');
+                      return [v1, v2, (v3!==null)? v3 : undefined];
+                    } catch (e) {
+                      return ['alloy', 'auto', undefined];
+                    }
+                  }
+              """)
 
 # -------------------------
 # FastAPI app (for Render / uvicorn)
