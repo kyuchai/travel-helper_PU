@@ -1,9 +1,11 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🧳 旅遊小管家 Pro（語音直送版：說完自動送出；可切換是否自動送出）
+# 🧳 旅遊小管家 Pro（按鈕錄音版：開始錄音→停止並送出；Render/uvicorn）
 # ==========================================
 import os
+import io
+import base64
 import tempfile
 from datetime import datetime
 
@@ -51,7 +53,7 @@ def safe_chat(user_text: str, system_prompt: str):
     except Exception as e:
         return None, _fmt_err(e)
 
-def safe_transcribe(path: str, lang_label: str):
+def safe_transcribe_file(path: str, lang_label: str):
     try:
         lang = LANG_MAP.get(lang_label, "auto")
         kwargs = {"model": "whisper-1"}
@@ -77,7 +79,30 @@ def safe_tts(text: str, voice_name: str):
         return None, _fmt_err(e)
 
 # -------------------------
-# 事件
+# 小工具
+# -------------------------
+def write_dataurl_to_file(data_url: str) -> str:
+    """
+    data_url 形如: 'data:audio/webm;codecs=opus;base64,AAAA...' -> 寫到臨時 .webm
+    """
+    if not data_url or "," not in data_url:
+        raise ValueError("無效的音訊資料。")
+    header, b64 = data_url.split(",", 1)
+    ext = ".webm"
+    if "audio/ogg" in header:
+        ext = ".ogg"
+    elif "audio/mpeg" in header or "audio/mp3" in header:
+        ext = ".mp3"
+    elif "audio/wav" in header:
+        ext = ".wav"
+    raw = base64.b64decode(b64)
+    path = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
+    with open(path, "wb") as f:
+        f.write(raw)
+    return path
+
+# -------------------------
+# 事件：文字輸入
 # -------------------------
 def on_send_text(msg, history, voice_name, system_prompt):
     if not (msg or "").strip():
@@ -93,59 +118,31 @@ def on_send_text(msg, history, voice_name, system_prompt):
     history = (history or []) + [(msg, bot)]
     return history, history, "", audio_path, bot, ""
 
-# 語音直送：錄音/上傳完成 -> 自動轉文字 -> 若 AutoSend 勾選則立即送出
-def on_mic_changed(audio_file, auto_send, history, voice_name, system_prompt, whisper_lang_label):
-    if not audio_file:
-        return history, history, None, "", gr.update(visible=False), None, "尚未錄音或未選擇檔案。"
-    text, err = safe_transcribe(audio_file, whisper_lang_label)
-    if err:
-        return history, history, None, err, gr.update(visible=True), None, ""
+# -------------------------
+# 事件：停止並送出（從 dataURL -> 檔案 -> Whisper -> Chat -> TTS）
+# -------------------------
+def on_audio_dataurl_received(audio_b64_dataurl, history, voice_name, system_prompt, whisper_lang_label):
+    if not audio_b64_dataurl:
+        return history, history, None, "沒有錄到音，請重試。"
+    try:
+        path = write_dataurl_to_file(audio_b64_dataurl)
+    except Exception as e:
+        return history, history, None, _fmt_err(e)
 
-    # 先把轉文字放到預覽框
-    pending_visible = gr.update(visible=True)
+    text, terr = safe_transcribe_file(path, whisper_lang_label)
+    if terr:
+        return history, history, None, terr
 
-    if not auto_send:
-        # 只預覽，不送出
-        return history, history, None, text, pending_visible, None, ""
-
-    # AutoSend：直接當作問題送出
     bot, cerr = safe_chat(text, system_prompt)
     audio_path = None
     if cerr:
         bot = cerr
     else:
-        audio_path, terr = safe_tts(bot, voice_name)
-        if terr:
-            bot += f"\n\n（語音產生失敗：{terr}）"
-    history = (history or []) + [(f"(語音直送)\n{text}", bot)]
-    # 清空 pending，並把 audio 清掉，避免重複送
-    return history, history, audio_path, "", gr.update(visible=False), None, ""
-
-def on_send_pending(audio_file, pending_text, history, voice_name, system_prompt):
-    text = (pending_text or "").strip()
-    if not text and audio_file:
-        text, err = safe_transcribe(audio_file, "auto")
-        if err:
-            return history, history, None, err, gr.update(visible=True), None
-    if not text:
-        return history, history, None, "沒有可送出的內容。", gr.update(visible=True), None
-
-    bot, err = safe_chat(text, system_prompt)
-    audio_path = None
-    if err:
-        bot = err
-    else:
-        audio_path, tts_err = safe_tts(bot, voice_name)
-        if tts_err:
-            bot += f"\n\n（語音產生失敗：{tts_err}）"
-    history = (history or []) + [(f"(語音轉文字)\n{text}", bot)]
-    return history, history, audio_path, "", gr.update(visible=False), None
-
-def on_clear_pending(_):
-    return "", gr.update(visible=False), None
-
-def clear_audio(_):
-    return None
+        audio_path, aerr = safe_tts(bot, voice_name)
+        if aerr:
+            bot += f"\n\n（語音產生失敗：{aerr}）"
+    history = (history or []) + [(f"(語音提問)\n{text}", bot)]
+    return history, history, audio_path, ""
 
 def export_chat(history):
     try:
@@ -168,7 +165,7 @@ def clear_history_both():
     return [], []
 
 # -------------------------
-# UI
+# UI 與 JS
 # -------------------------
 CSS_TECH = """
 :root{--bg:#0a1120;--panel:#0f1b33cc;--stroke:#1e2b4d;--text:#e8eefc;--muted:#9bb0d6;--accent:#54b7ff;--accent-2:#00ffd0;}
@@ -178,8 +175,60 @@ body{background:radial-gradient(1200px 600px at 20% -10%, #11315d55, transparent
 button.primary{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#00121d;font-weight:700;border-radius:12px!important}
 """
 
-with gr.Blocks(title="旅遊小管家 Pro（語音直送版）", css=CSS_TECH) as demo:
-    gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>直接說話就送出 × 也可只預覽</span>")
+# JS：使用 MediaRecorder 控制開始/停止，並把 DataURL 回傳給 Python
+JS_START_RECORD = """
+async () => {
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return ['不支援', null];
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mr = new MediaRecorder(stream);
+    window.__mr_chunks = [];
+    window.__mr_stream = stream;
+    window.__mr = mr;
+    mr.ondataavailable = (e)=>{ if (e.data && e.data.size) window.__mr_chunks.push(e.data); };
+    mr.start();
+    return ['錄音中...', null];
+  } catch (e) {
+    return ['權限被拒或裝置不可用', null];
+  }
+}
+"""
+
+JS_STOP_AND_EXPORT = """
+async () => {
+  try{
+    const mr = window.__mr;
+    const stream = window.__mr_stream;
+    if (!mr) { return [ '尚未開始錄音', null ]; }
+    return await new Promise(resolve => {
+      mr.onstop = async () => {
+        try{
+          const blob = new Blob(window.__mr_chunks || [], { type: 'audio/webm;codecs=opus' });
+          if (stream) { stream.getTracks().forEach(t=>t.stop()); }
+          window.__mr = null; window.__mr_stream = null; window.__mr_chunks = null;
+          const dataUrl = await new Promise((res,rej)=>{
+            const reader = new FileReader();
+            reader.onloadend = () => res(reader.result);
+            reader.onerror = rej;
+            reader.readAsDataURL(blob);
+          });
+          resolve(['已停止並送出', dataUrl]);
+        }catch(err){
+          resolve([ '轉檔失敗', null ]);
+        }
+      };
+      mr.stop();
+    });
+  }catch(e){
+    return [ '停止失敗', null ];
+  }
+}
+"""
+
+with gr.Blocks(title="旅遊小管家 Pro（按鈕錄音版）", css=CSS_TECH) as demo:
+    gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>按一下開始錄音 → 再按一下停止並送出</span>")
     with gr.Row(equal_height=True):
         # 左：聊天
         with gr.Column(scale=3, elem_classes=["neon-panel"]):
@@ -201,17 +250,16 @@ with gr.Blocks(title="旅遊小管家 Pro（語音直送版）", css=CSS_TECH) a
 
         # 右：語音 & 設定
         with gr.Column(scale=2, elem_classes=["neon-panel"]):
-            gr.Markdown("### 🎤 語音輸入（停止錄音後：自動轉文字 → 依設定自動送出或僅預覽）")
+            gr.Markdown("### 🎤 語音直送（按鈕控制）")
 
-            mic_audio = gr.Audio(sources=["microphone","upload"], type="filepath",
-                                 label="按左上角麥克風開始錄音；停止後自動轉文字")
-            auto_send = gr.Checkbox(value=True, label="停止錄音後自動送出（語音直送）")
-
-            pending_box = gr.Textbox(label="🕒 尚未送出的語音文字（僅預覽模式會看到）", visible=False, lines=3)
+            # 錄音控制與狀態
             with gr.Row():
-                send_voice_btn = gr.Button("✅ 送出語音內容（僅預覽模式使用）", elem_classes=["primary"])
-                cancel_pending_btn = gr.Button("❎ 取消（清除預覽）")
-                drop_btn = gr.Button("🗑️ 清除音訊")
+                start_btn = gr.Button("🎙️ 開始錄音", elem_classes=["primary"])
+                stop_send_btn = gr.Button("⏹️ 停止並送出")
+            mic_status = gr.Textbox(value="尚未錄音", label="狀態", interactive=False)
+
+            # 由 JS 送來的 dataURL（隱藏）
+            audio_dataurl_box = gr.Textbox(visible=False)
 
             gr.Markdown("---")
             gr.Markdown("### ⚙️ 偏好設定")
@@ -219,22 +267,21 @@ with gr.Blocks(title="旅遊小管家 Pro（語音直送版）", css=CSS_TECH) a
             whisper_lang_dd = gr.Dropdown(choices=LANG_CHOICES, value="auto", label="Whisper 語言")
             system_prompt_tb = gr.Textbox(value=DEFAULT_SYSTEM_PROMPT, label="System Prompt（系統提示詞）", lines=3)
 
-    # 綁定事件
+    # 事件：文字聊天
     send_btn.click(on_send_text, [user_text, history_state, voice_dropdown, system_prompt_tb],
                    [chatbot, history_state, user_text, tts_output, latest_text, error_box])
     clear_btn.click(clear_history_both, None, [chatbot, history_state])
 
-    # ✅ 語音直送：Audio 變更（停止錄音或選檔）即觸發
-    mic_audio.change(on_mic_changed,
-                     [mic_audio, auto_send, history_state, voice_dropdown, system_prompt_tb, whisper_lang_dd],
-                     [chatbot, history_state, tts_output, pending_box, pending_box, mic_audio, error_box])
+    # 事件：開始錄音（純前端）
+    start_btn.click(lambda: ("錄音中...", None), None, [mic_status, audio_dataurl_box], _js=JS_START_RECORD)
 
-    # 僅預覽模式下手動送出/取消/清除
-    send_voice_btn.click(on_send_pending, [mic_audio, pending_box, history_state, voice_dropdown, system_prompt_tb],
-                         [chatbot, history_state, tts_output, pending_box, pending_box, mic_audio])
-    cancel_pending_btn.click(lambda _:"", [pending_box], [pending_box])
-    drop_btn.click(clear_audio, [mic_audio], [mic_audio])
+    # 事件：停止並送出（前端停止並傳 dataURL → 後端轉文字/聊天/TTS）
+    stop_send_btn.click(on_audio_dataurl_received,
+                        [audio_dataurl_box, history_state, voice_dropdown, system_prompt_tb, whisper_lang_dd],
+                        [chatbot, history_state, tts_output, mic_status],
+                        _js=JS_STOP_AND_EXPORT)
 
+    # 匯出
     export_btn.click(export_chat, [history_state], [export_file])
 
 # -------------------------
