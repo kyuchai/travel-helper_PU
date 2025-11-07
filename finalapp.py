@@ -1,14 +1,14 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🧳 旅遊小管家 Pro（穩定版：移除 load JS、修正預聽傳參；Render/uvicorn）
+# 🧳 旅遊小管家 Pro（穩定加強版：完整例外處理，避免 "not valid JSON"）
 # ==========================================
 import os
 import tempfile
 from datetime import datetime
 
 import gradio as gr
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, APIStatusError, BadRequestError, AuthenticationError
 from fastapi import FastAPI
 
 # -------------------------
@@ -19,64 +19,108 @@ if not api_key:
     raise ValueError("❌ 請先設定環境變數 OPENAI_API_KEY")
 client = OpenAI(api_key=api_key)
 
-VOICE_CHOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"]
+VOICE_CHOICES = ["alloy","ash","ballad","coral","echo","fable","nova","onyx","sage","shimmer","verse"]
 FIXED_TTS_MODEL = "gpt-4o-mini-tts"
 LANG_CHOICES = ["auto","中文(zh)","英文(en)","泰文(th)","日文(ja)","韓文(ko)","法文(fr)","德文(de)","西班牙文(es)","越南文(vi)"]
 LANG_MAP = {"auto":"auto","中文(zh)":"zh","英文(en)":"en","泰文(th)":"th","日文(ja)":"ja","韓文(ko)":"ko","法文(fr)":"fr","德文(de)":"de","西班牙文(es)":"es","越南文(vi)":"vi"}
 DEFAULT_SYSTEM_PROMPT = "你是旅遊小管家，回答精簡、實用，使用繁體中文。"
 
 # -------------------------
-# 功能函式
+# 安全呼叫包裝
 # -------------------------
-def chat_answer(user_text: str, system_prompt: str) -> str:
-    if not user_text.strip():
-        return "請輸入訊息或使用語音～"
-    sys_prompt = system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"system","content":sys_prompt},{"role":"user","content":user_text}],
-        temperature=0.5,
-    )
-    return resp.choices[0].message.content.strip()
+def _fmt_err(e: Exception) -> str:
+    if isinstance(e, AuthenticationError):
+        return "⚠️ OpenAI 驗證失敗：請確認 OPENAI_API_KEY 是否正確。"
+    if isinstance(e, BadRequestError):
+        return f"⚠️ 參數錯誤：{getattr(e, 'message', str(e))}"
+    if isinstance(e, APIStatusError):
+        return f"⚠️ 服務狀態錯誤：{e.status_code} {getattr(e, 'message', str(e))}"
+    if isinstance(e, APIConnectionError):
+        return "⚠️ 無法連線到 OpenAI 服務，請稍後再試或檢查網路/防火牆。"
+    return f"⚠️ 未預期錯誤：{str(e)}"
 
-def transcribe_audio_to_text(audio_file_path: str, lang_label: str) -> str:
-    lang_code = LANG_MAP.get(lang_label, "auto")
-    kwargs = {"model": "whisper-1"}
-    if lang_code != "auto":
-        kwargs["language"] = lang_code
-    with open(audio_file_path, "rb") as f:
-        result = client.audio.transcriptions.create(file=f, **kwargs)
-    return (getattr(result, "text", "") or "").strip()
+def safe_chat(user_text: str, system_prompt: str):
+    try:
+        sys_prompt = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"system","content":sys_prompt},{"role":"user","content":user_text}],
+            temperature=0.5,
+        )
+        return resp.choices[0].message.content.strip(), None
+    except Exception as e:
+        return None, _fmt_err(e)
 
-def text_to_speech(text: str, voice_name: str):
-    if not text.strip():
-        return None
-    speech_file_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3").name
-    with client.audio.speech.with_streaming_response.create(model=FIXED_TTS_MODEL, voice=voice_name, input=text) as r:
-        r.stream_to_file(speech_file_path)
-    return speech_file_path
+def safe_transcribe(path: str, lang_label: str):
+    try:
+        lang = LANG_MAP.get(lang_label, "auto")
+        kwargs = {"model": "whisper-1"}
+        if lang != "auto":
+            kwargs["language"] = lang
+        with open(path, "rb") as f:
+            result = client.audio.transcriptions.create(file=f, **kwargs)
+        return (getattr(result, "text", "") or "").strip(), None
+    except Exception as e:
+        return None, _fmt_err(e)
 
+def safe_tts(text: str, voice_name: str):
+    try:
+        if not text.strip():
+            return None, None
+        out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3").name
+        with client.audio.speech.with_streaming_response.create(
+            model=FIXED_TTS_MODEL, voice=voice_name, input=text
+        ) as r:
+            r.stream_to_file(out)
+        return out, None
+    except Exception as e:
+        return None, _fmt_err(e)
+
+# -------------------------
+# 事件函式
+# -------------------------
 def on_send_text(msg, history, voice_name, system_prompt):
-    bot_text = chat_answer(msg, system_prompt)
-    history = (history or []) + [(msg, bot_text)]
-    audio_path = text_to_speech(bot_text, voice_name)
-    return history, history, "", audio_path, bot_text
+    if not (msg or "").strip():
+        return history, history, "", None, "請輸入訊息或使用語音～", ""
+    bot, err = safe_chat(msg, system_prompt)
+    if err:
+        # 把錯誤顯著地顯示在聊天與錯誤框
+        bot = err
+        audio_path = None
+    else:
+        audio_path, tts_err = safe_tts(bot, voice_name)
+        if tts_err:
+            # 即使 TTS 出錯也不要中斷整個回傳
+            bot += f"\n\n（語音產生失敗：{tts_err}）"
+    history = (history or []) + [(msg, bot)]
+    return history, history, "", audio_path, bot, ""
 
 def on_preview_voice(audio_file, whisper_lang_label):
     if not audio_file:
-        return "", gr.update(visible=False), None
-    text = transcribe_audio_to_text(audio_file, whisper_lang_label)
+        return "尚未錄音。", gr.update(visible=True), None
+    text, err = safe_transcribe(audio_file, whisper_lang_label)
+    if err:
+        return err, gr.update(visible=True), None
     return text, gr.update(visible=True), None
 
 def on_send_voice(audio_file, pending_text, history, voice_name, system_prompt):
     text = (pending_text or "").strip()
     if not text and audio_file:
-        text = transcribe_audio_to_text(audio_file, "auto")
+        text, err = safe_transcribe(audio_file, "auto")
+        if err:
+            return history, history, None, err, gr.update(visible=True), None
     if not text:
-        return history, history, None, "", gr.update(visible=False), None
-    bot_text = chat_answer(text, system_prompt)
-    history = (history or []) + [(f"(語音轉文字)\\n{text}", bot_text)]
-    audio_path = text_to_speech(bot_text, voice_name)
+        return history, history, None, "沒有可送出的內容。", gr.update(visible=True), None
+
+    bot, err = safe_chat(text, system_prompt)
+    if err:
+        bot = err
+        audio_path = None
+    else:
+        audio_path, tts_err = safe_tts(bot, voice_name)
+        if tts_err:
+            bot += f"\n\n（語音產生失敗：{tts_err}）"
+    history = (history or []) + [(f"(語音轉文字)\n{text}", bot)]
     return history, history, audio_path, "", gr.update(visible=False), None
 
 def on_clear_pending(_):
@@ -86,15 +130,22 @@ def clear_audio(_):
     return None
 
 def export_chat(history):
-    if not history:
-        return None
-    lines = [f"旅遊小管家對話匯出 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "="*60]
-    for user, bot in history:
-        lines += ["使用者：", user or "", "小管家：", bot or "", "-"*40]
-    path = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    return path
+    try:
+        if not history:
+            return None
+        lines = [f"旅遊小管家對話匯出 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "="*60]
+        for user, bot in history:
+            lines += ["使用者：", user or "", "小管家：", bot or "", "-"*40]
+        path = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return path
+    except Exception as e:
+        # 任何錯誤都不要往外丟，避免前端 JSON 解析出錯
+        path = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(_fmt_err(e))
+        return path
 
 def clear_history_both():
     return [], []
@@ -102,6 +153,9 @@ def clear_history_both():
 def noop_return_none(*args, **kwargs):
     return None
 
+# -------------------------
+# UI
+# -------------------------
 CSS_TECH = """
 :root{--bg:#0a1120;--panel:#0f1b33cc;--stroke:#1e2b4d;--text:#e8eefc;--muted:#9bb0d6;--accent:#54b7ff;--accent-2:#00ffd0;}
 .gradio-container{font-family:ui-sans-serif,system-ui,PingFangTC,'Noto Sans TC',Segoe UI,Roboto,Helvetica,Arial;}
@@ -110,10 +164,7 @@ body{background:radial-gradient(1200px 600px at 20% -10%, #11315d55, transparent
 button.primary{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#00121d;font-weight:700;border-radius:12px!important}
 """
 
-# -------------------------
-# Gradio 介面
-# -------------------------
-with gr.Blocks(title="旅遊小管家 Pro（穩定版）", css=CSS_TECH) as demo:
+with gr.Blocks(title="旅遊小管家 Pro（穩定加強版）", css=CSS_TECH) as demo:
     gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>語音互動 × 智慧回覆 × 偏好記憶</span>")
     with gr.Row(equal_height=True):
         with gr.Column(scale=3, elem_classes=["neon-panel"]):
@@ -126,7 +177,8 @@ with gr.Blocks(title="旅遊小管家 Pro（穩定版）", css=CSS_TECH) as demo
                 clear_btn = gr.Button("🧹 清空對話")
 
             tts_output = gr.Audio(label="🔊 回覆語音", type="filepath", interactive=False)
-            transcript_tb = gr.Textbox(label="📝 送出內容（最新輪）", interactive=False)
+            latest_text = gr.Textbox(label="📝 送出內容（最新輪）", interactive=False)
+            error_box = gr.Textbox(label="⚠️ 訊息 / 錯誤提示", interactive=False)
 
             with gr.Row():
                 export_btn = gr.Button("📝 匯出對話（.txt）")
@@ -152,11 +204,9 @@ with gr.Blocks(title="旅遊小管家 Pro（穩定版）", css=CSS_TECH) as demo
             whisper_lang_dd = gr.Dropdown(choices=LANG_CHOICES, value="auto", label="Whisper 語言")
             system_prompt_tb = gr.Textbox(value=DEFAULT_SYSTEM_PROMPT, label="System Prompt（系統提示詞）", lines=3)
 
-            dummy_store = gr.Textbox(visible=False)
-
     # 綁定事件
     send_btn.click(on_send_text, [user_text, history_state, voice_dropdown, system_prompt_tb],
-                   [chatbot, history_state, user_text, tts_output, transcript_tb])
+                   [chatbot, history_state, user_text, tts_output, latest_text, error_box])
     clear_btn.click(clear_history_both, None, [chatbot, history_state])
 
     preview_btn.click(on_preview_voice, [mic_audio, whisper_lang_dd], [pending_box, pending_box, tts_output])
