@@ -1,7 +1,7 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🧳 旅遊小管家 Pro（穩定加強版：完整例外處理，避免 "not valid JSON"）
+# 🧳 旅遊小管家 Pro（即時錄製＆上傳：自動轉文字預覽；穩定加強版；Render/uvicorn）
 # ==========================================
 import os
 import tempfile
@@ -26,7 +26,7 @@ LANG_MAP = {"auto":"auto","中文(zh)":"zh","英文(en)":"en","泰文(th)":"th",
 DEFAULT_SYSTEM_PROMPT = "你是旅遊小管家，回答精簡、實用，使用繁體中文。"
 
 # -------------------------
-# 安全呼叫包裝
+# 錯誤格式化
 # -------------------------
 def _fmt_err(e: Exception) -> str:
     if isinstance(e, AuthenticationError):
@@ -77,27 +77,25 @@ def safe_tts(text: str, voice_name: str):
         return None, _fmt_err(e)
 
 # -------------------------
-# 事件函式
+# 事件
 # -------------------------
 def on_send_text(msg, history, voice_name, system_prompt):
     if not (msg or "").strip():
         return history, history, "", None, "請輸入訊息或使用語音～", ""
     bot, err = safe_chat(msg, system_prompt)
+    audio_path = None
     if err:
-        # 把錯誤顯著地顯示在聊天與錯誤框
         bot = err
-        audio_path = None
     else:
         audio_path, tts_err = safe_tts(bot, voice_name)
         if tts_err:
-            # 即使 TTS 出錯也不要中斷整個回傳
             bot += f"\n\n（語音產生失敗：{tts_err}）"
     history = (history or []) + [(msg, bot)]
     return history, history, "", audio_path, bot, ""
 
 def on_preview_voice(audio_file, whisper_lang_label):
     if not audio_file:
-        return "尚未錄音。", gr.update(visible=True), None
+        return "尚未錄音或尚未選擇檔案。", gr.update(visible=True), None
     text, err = safe_transcribe(audio_file, whisper_lang_label)
     if err:
         return err, gr.update(visible=True), None
@@ -113,9 +111,9 @@ def on_send_voice(audio_file, pending_text, history, voice_name, system_prompt):
         return history, history, None, "沒有可送出的內容。", gr.update(visible=True), None
 
     bot, err = safe_chat(text, system_prompt)
+    audio_path = None
     if err:
         bot = err
-        audio_path = None
     else:
         audio_path, tts_err = safe_tts(bot, voice_name)
         if tts_err:
@@ -141,7 +139,6 @@ def export_chat(history):
             f.write("\n".join(lines))
         return path
     except Exception as e:
-        # 任何錯誤都不要往外丟，避免前端 JSON 解析出錯
         path = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
         with open(path, "w", encoding="utf-8") as f:
             f.write(_fmt_err(e))
@@ -149,9 +146,6 @@ def export_chat(history):
 
 def clear_history_both():
     return [], []
-
-def noop_return_none(*args, **kwargs):
-    return None
 
 # -------------------------
 # UI
@@ -164,9 +158,10 @@ body{background:radial-gradient(1200px 600px at 20% -10%, #11315d55, transparent
 button.primary{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#00121d;font-weight:700;border-radius:12px!important}
 """
 
-with gr.Blocks(title="旅遊小管家 Pro（穩定加強版）", css=CSS_TECH) as demo:
-    gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>語音互動 × 智慧回覆 × 偏好記憶</span>")
+with gr.Blocks(title="旅遊小管家 Pro（即時錄製＆上傳）", css=CSS_TECH) as demo:
+    gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>錄音即轉文字 × 檔案上傳即預覽</span>")
     with gr.Row(equal_height=True):
+        # 左：聊天
         with gr.Column(scale=3, elem_classes=["neon-panel"]):
             chatbot = gr.Chatbot(label="對話區", height=520)
             history_state = gr.State([])
@@ -184,19 +179,18 @@ with gr.Blocks(title="旅遊小管家 Pro（穩定加強版）", css=CSS_TECH) a
                 export_btn = gr.Button("📝 匯出對話（.txt）")
                 export_file = gr.File(label="下載檔案", visible=True)
 
+        # 右：語音 & 設定
         with gr.Column(scale=2, elem_classes=["neon-panel"]):
-            gr.Markdown("### 🎤 語音輸入（先錄音 → 預聽 → 再決定送出）")
-            mic_audio = gr.Audio(sources=["microphone","upload"], type="filepath", label="錄音或上傳檔案")
+            gr.Markdown("### 🎤 語音輸入（錄音或上傳後自動轉文字→預覽→再決定送出）")
 
-            with gr.Row():
-                preview_btn = gr.Button("👂 預聽 / 轉文字（尚未送出）", elem_classes=["primary"])
-                redo_btn = gr.Button("🔁 重新錄製")
-                drop_btn = gr.Button("🗑️ 清除音訊")
+            mic_audio = gr.Audio(sources=["microphone","upload"], type="filepath",
+                                 label="錄音或上傳檔案（停止錄音或選擇檔案後會自動轉文字並顯示於下方）")
 
             pending_box = gr.Textbox(label="🕒 尚未送出的語音文字（請檢查內容）", visible=False, lines=3)
             with gr.Row():
                 send_voice_btn = gr.Button("✅ 送出語音內容", elem_classes=["primary"])
                 cancel_pending_btn = gr.Button("❎ 取消（重錄）")
+                drop_btn = gr.Button("🗑️ 清除音訊")
 
             gr.Markdown("---")
             gr.Markdown("### ⚙️ 偏好設定")
@@ -209,11 +203,13 @@ with gr.Blocks(title="旅遊小管家 Pro（穩定加強版）", css=CSS_TECH) a
                    [chatbot, history_state, user_text, tts_output, latest_text, error_box])
     clear_btn.click(clear_history_both, None, [chatbot, history_state])
 
-    preview_btn.click(on_preview_voice, [mic_audio, whisper_lang_dd], [pending_box, pending_box, tts_output])
+    # ✅ 「即時錄製＆上傳」：Audio 元件變動就自動做預覽/轉文字
+    mic_audio.change(on_preview_voice, [mic_audio, whisper_lang_dd], [pending_box, pending_box, tts_output])
+
+    # 送出 / 取消 / 清除
     send_voice_btn.click(on_send_voice, [mic_audio, pending_box, history_state, voice_dropdown, system_prompt_tb],
                          [chatbot, history_state, tts_output, pending_box, pending_box, mic_audio])
     cancel_pending_btn.click(on_clear_pending, [pending_box], [pending_box, pending_box, mic_audio])
-    redo_btn.click(clear_audio, [mic_audio], [mic_audio])
     drop_btn.click(clear_audio, [mic_audio], [mic_audio])
 
     export_btn.click(export_chat, [history_state], [export_file])
