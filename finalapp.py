@@ -1,7 +1,7 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🧳 旅遊小管家 Pro（即時錄製＆上傳：自動轉文字預覽；穩定加強版；Render/uvicorn）
+# 🧳 旅遊小管家 Pro（語音直送版：說完自動送出；可切換是否自動送出）
 # ==========================================
 import os
 import tempfile
@@ -93,15 +93,35 @@ def on_send_text(msg, history, voice_name, system_prompt):
     history = (history or []) + [(msg, bot)]
     return history, history, "", audio_path, bot, ""
 
-def on_preview_voice(audio_file, whisper_lang_label):
+# 語音直送：錄音/上傳完成 -> 自動轉文字 -> 若 AutoSend 勾選則立即送出
+def on_mic_changed(audio_file, auto_send, history, voice_name, system_prompt, whisper_lang_label):
     if not audio_file:
-        return "尚未錄音或尚未選擇檔案。", gr.update(visible=True), None
+        return history, history, None, "", gr.update(visible=False), None, "尚未錄音或未選擇檔案。"
     text, err = safe_transcribe(audio_file, whisper_lang_label)
     if err:
-        return err, gr.update(visible=True), None
-    return text, gr.update(visible=True), None
+        return history, history, None, err, gr.update(visible=True), None, ""
 
-def on_send_voice(audio_file, pending_text, history, voice_name, system_prompt):
+    # 先把轉文字放到預覽框
+    pending_visible = gr.update(visible=True)
+
+    if not auto_send:
+        # 只預覽，不送出
+        return history, history, None, text, pending_visible, None, ""
+
+    # AutoSend：直接當作問題送出
+    bot, cerr = safe_chat(text, system_prompt)
+    audio_path = None
+    if cerr:
+        bot = cerr
+    else:
+        audio_path, terr = safe_tts(bot, voice_name)
+        if terr:
+            bot += f"\n\n（語音產生失敗：{terr}）"
+    history = (history or []) + [(f"(語音直送)\n{text}", bot)]
+    # 清空 pending，並把 audio 清掉，避免重複送
+    return history, history, audio_path, "", gr.update(visible=False), None, ""
+
+def on_send_pending(audio_file, pending_text, history, voice_name, system_prompt):
     text = (pending_text or "").strip()
     if not text and audio_file:
         text, err = safe_transcribe(audio_file, "auto")
@@ -158,8 +178,8 @@ body{background:radial-gradient(1200px 600px at 20% -10%, #11315d55, transparent
 button.primary{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#00121d;font-weight:700;border-radius:12px!important}
 """
 
-with gr.Blocks(title="旅遊小管家 Pro（即時錄製＆上傳）", css=CSS_TECH) as demo:
-    gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>錄音即轉文字 × 檔案上傳即預覽</span>")
+with gr.Blocks(title="旅遊小管家 Pro（語音直送版）", css=CSS_TECH) as demo:
+    gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>直接說話就送出 × 也可只預覽</span>")
     with gr.Row(equal_height=True):
         # 左：聊天
         with gr.Column(scale=3, elem_classes=["neon-panel"]):
@@ -181,15 +201,16 @@ with gr.Blocks(title="旅遊小管家 Pro（即時錄製＆上傳）", css=CSS_T
 
         # 右：語音 & 設定
         with gr.Column(scale=2, elem_classes=["neon-panel"]):
-            gr.Markdown("### 🎤 語音輸入（錄音或上傳後自動轉文字→預覽→再決定送出）")
+            gr.Markdown("### 🎤 語音輸入（停止錄音後：自動轉文字 → 依設定自動送出或僅預覽）")
 
             mic_audio = gr.Audio(sources=["microphone","upload"], type="filepath",
-                                 label="錄音或上傳檔案（停止錄音或選擇檔案後會自動轉文字並顯示於下方）")
+                                 label="按左上角麥克風開始錄音；停止後自動轉文字")
+            auto_send = gr.Checkbox(value=True, label="停止錄音後自動送出（語音直送）")
 
-            pending_box = gr.Textbox(label="🕒 尚未送出的語音文字（請檢查內容）", visible=False, lines=3)
+            pending_box = gr.Textbox(label="🕒 尚未送出的語音文字（僅預覽模式會看到）", visible=False, lines=3)
             with gr.Row():
-                send_voice_btn = gr.Button("✅ 送出語音內容", elem_classes=["primary"])
-                cancel_pending_btn = gr.Button("❎ 取消（重錄）")
+                send_voice_btn = gr.Button("✅ 送出語音內容（僅預覽模式使用）", elem_classes=["primary"])
+                cancel_pending_btn = gr.Button("❎ 取消（清除預覽）")
                 drop_btn = gr.Button("🗑️ 清除音訊")
 
             gr.Markdown("---")
@@ -203,13 +224,15 @@ with gr.Blocks(title="旅遊小管家 Pro（即時錄製＆上傳）", css=CSS_T
                    [chatbot, history_state, user_text, tts_output, latest_text, error_box])
     clear_btn.click(clear_history_both, None, [chatbot, history_state])
 
-    # ✅ 「即時錄製＆上傳」：Audio 元件變動就自動做預覽/轉文字
-    mic_audio.change(on_preview_voice, [mic_audio, whisper_lang_dd], [pending_box, pending_box, tts_output])
+    # ✅ 語音直送：Audio 變更（停止錄音或選檔）即觸發
+    mic_audio.change(on_mic_changed,
+                     [mic_audio, auto_send, history_state, voice_dropdown, system_prompt_tb, whisper_lang_dd],
+                     [chatbot, history_state, tts_output, pending_box, pending_box, mic_audio, error_box])
 
-    # 送出 / 取消 / 清除
-    send_voice_btn.click(on_send_voice, [mic_audio, pending_box, history_state, voice_dropdown, system_prompt_tb],
+    # 僅預覽模式下手動送出/取消/清除
+    send_voice_btn.click(on_send_pending, [mic_audio, pending_box, history_state, voice_dropdown, system_prompt_tb],
                          [chatbot, history_state, tts_output, pending_box, pending_box, mic_audio])
-    cancel_pending_btn.click(on_clear_pending, [pending_box], [pending_box, pending_box, mic_audio])
+    cancel_pending_btn.click(lambda _:"", [pending_box], [pending_box])
     drop_btn.click(clear_audio, [mic_audio], [mic_audio])
 
     export_btn.click(export_chat, [history_state], [export_file])
