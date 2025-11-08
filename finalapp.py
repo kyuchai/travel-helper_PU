@@ -1,7 +1,7 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🧳 旅遊小管家 Pro（按鈕錄音版：開始錄音→停止並送出；Latest Fixed）
+# 🧳 旅遊小管家 Pro（按鈕錄音版：輸入長度對齊；最終修正版）
 # ==========================================
 import os
 import base64
@@ -81,19 +81,13 @@ def safe_tts(text: str, voice_name: str):
 # 小工具
 # -------------------------
 def write_dataurl_to_file(data_url: str) -> str:
-    """
-    data_url: 'data:audio/webm;codecs=opus;base64,AAAA...' -> 寫到臨時 .webm/.ogg/.mp3/.wav
-    """
     if not data_url or "," not in data_url:
         raise ValueError("無效的音訊資料。")
     header, b64 = data_url.split(",", 1)
     ext = ".webm"
-    if "audio/ogg" in header:
-        ext = ".ogg"
-    elif "audio/mpeg" in header or "audio/mp3" in header:
-        ext = ".mp3"
-    elif "audio/wav" in header:
-        ext = ".wav"
+    if "audio/ogg" in header: ext = ".ogg"
+    elif "audio/mpeg" in header or "audio/mp3" in header: ext = ".mp3"
+    elif "audio/wav" in header: ext = ".wav"
     raw = base64.b64decode(b64)
     path = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
     with open(path, "wb") as f:
@@ -118,7 +112,7 @@ def on_send_text(msg, history, voice_name, system_prompt):
     return history, history, "", audio_path, bot, ""
 
 # -------------------------
-# 事件：停止並送出（從 dataURL -> 檔案 -> Whisper -> Chat -> TTS）
+# 事件：停止並送出
 # -------------------------
 def on_audio_dataurl_received(audio_b64_dataurl, history, voice_name, system_prompt, whisper_lang_label):
     if not audio_b64_dataurl:
@@ -174,11 +168,12 @@ body{background:radial-gradient(1200px 600px at 20% -10%, #11315d55, transparent
 button.primary{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#00121d;font-weight:700;border-radius:12px!important}
 """
 
+# JS：開始錄音（回傳陣列以對齊單一輸出 mic_status）
 JS_START_RECORD = """
 async () => {
   try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return '不支援';
+      return ['不支援'];
     }
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const mr = new MediaRecorder(stream);
@@ -187,19 +182,20 @@ async () => {
     window.__mr = mr;
     mr.ondataavailable = (e)=>{ if (e.data && e.data.size) window.__mr_chunks.push(e.data); };
     mr.start();
-    return '錄音中...';
+    return ['錄音中...'];
   } catch (e) {
-    return '權限被拒或裝置不可用';
+    return ['權限被拒或裝置不可用'];
   }
 }
 """
 
+# JS：停止並送出（回傳陣列以對齊 *輸入* 的 5 個值，僅替換第一個為 dataURL）
 JS_STOP_AND_EXPORT = """
-async () => {
+async (dataurl_box, history, voice, system_prompt, lang) => {
   try{
     const mr = window.__mr;
     const stream = window.__mr_stream;
-    if (!mr) { return null; }
+    if (!mr) { return [null, history, voice, system_prompt, lang]; }
     return await new Promise(resolve => {
       mr.onstop = async () => {
         try{
@@ -212,20 +208,20 @@ async () => {
             reader.onerror = rej;
             reader.readAsDataURL(blob);
           });
-          resolve(dataUrl);  // 只回傳 dataURL
+          resolve([dataUrl, history, voice, system_prompt, lang]);
         }catch(err){
-          resolve(null);
+          resolve([null, history, voice, system_prompt, lang]);
         }
       };
       mr.stop();
     });
   }catch(e){
-    return null;
+    return [null, history, voice, system_prompt, lang];
   }
 }
 """
 
-with gr.Blocks(title="旅遊小管家 Pro（按鈕錄音版 Fixed）", css=CSS_TECH) as demo:
+with gr.Blocks(title="旅遊小管家 Pro（按鈕錄音版 最終修正版）", css=CSS_TECH) as demo:
     gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>按一下開始錄音 → 再按一下停止並送出</span>")
     with gr.Row(equal_height=True):
         with gr.Column(scale=3, elem_classes=["neon-panel"]):
@@ -265,10 +261,10 @@ with gr.Blocks(title="旅遊小管家 Pro（按鈕錄音版 Fixed）", css=CSS_T
                    [chatbot, history_state, user_text, tts_output, latest_text, error_box])
     clear_btn.click(clear_history_both, None, [chatbot, history_state])
 
-    # 前端：開始錄音（只更新狀態文本）
-    start_btn.click(lambda: "錄音中...", None, [mic_status], _js=JS_START_RECORD)
+    # 前端：開始錄音（JS 回傳陣列以對齊 1 個輸出）
+    start_btn.click(fn=lambda: None, inputs=None, outputs=[mic_status], _js=JS_START_RECORD)
 
-    # 前端：停止並送出（JS 只回傳 dataURL 作為第一個輸入）
+    # 停止並送出（JS 回傳陣列以對齊 5 個 *輸入*；僅替換第一個為 dataURL）
     stop_send_btn.click(on_audio_dataurl_received,
                         [audio_dataurl_box, history_state, voice_dropdown, system_prompt_tb, whisper_lang_dd],
                         [chatbot, history_state, tts_output, mic_status],
