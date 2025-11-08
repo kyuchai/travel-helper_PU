@@ -1,10 +1,9 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🧳 旅遊小管家 Pro（按鈕錄音版：開始錄音→停止並送出；Render/uvicorn）
+# 🧳 旅遊小管家 Pro（按鈕錄音版：開始錄音→停止並送出；Latest Fixed）
 # ==========================================
 import os
-import io
 import base64
 import tempfile
 from datetime import datetime
@@ -83,7 +82,7 @@ def safe_tts(text: str, voice_name: str):
 # -------------------------
 def write_dataurl_to_file(data_url: str) -> str:
     """
-    data_url 形如: 'data:audio/webm;codecs=opus;base64,AAAA...' -> 寫到臨時 .webm
+    data_url: 'data:audio/webm;codecs=opus;base64,AAAA...' -> 寫到臨時 .webm/.ogg/.mp3/.wav
     """
     if not data_url or "," not in data_url:
         raise ValueError("無效的音訊資料。")
@@ -142,7 +141,7 @@ def on_audio_dataurl_received(audio_b64_dataurl, history, voice_name, system_pro
         if aerr:
             bot += f"\n\n（語音產生失敗：{aerr}）"
     history = (history or []) + [(f"(語音提問)\n{text}", bot)]
-    return history, history, audio_path, ""
+    return history, history, audio_path, "已停止並送出"
 
 def export_chat(history):
     try:
@@ -175,12 +174,11 @@ body{background:radial-gradient(1200px 600px at 20% -10%, #11315d55, transparent
 button.primary{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#00121d;font-weight:700;border-radius:12px!important}
 """
 
-# JS：使用 MediaRecorder 控制開始/停止，並把 DataURL 回傳給 Python
 JS_START_RECORD = """
 async () => {
   try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return ['不支援', null];
+      return '不支援';
     }
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const mr = new MediaRecorder(stream);
@@ -189,9 +187,9 @@ async () => {
     window.__mr = mr;
     mr.ondataavailable = (e)=>{ if (e.data && e.data.size) window.__mr_chunks.push(e.data); };
     mr.start();
-    return ['錄音中...', null];
+    return '錄音中...';
   } catch (e) {
-    return ['權限被拒或裝置不可用', null];
+    return '權限被拒或裝置不可用';
   }
 }
 """
@@ -201,7 +199,7 @@ async () => {
   try{
     const mr = window.__mr;
     const stream = window.__mr_stream;
-    if (!mr) { return [ '尚未開始錄音', null ]; }
+    if (!mr) { return null; }
     return await new Promise(resolve => {
       mr.onstop = async () => {
         try{
@@ -214,23 +212,22 @@ async () => {
             reader.onerror = rej;
             reader.readAsDataURL(blob);
           });
-          resolve(['已停止並送出', dataUrl]);
+          resolve(dataUrl);  // 只回傳 dataURL
         }catch(err){
-          resolve([ '轉檔失敗', null ]);
+          resolve(null);
         }
       };
       mr.stop();
     });
   }catch(e){
-    return [ '停止失敗', null ];
+    return null;
   }
 }
 """
 
-with gr.Blocks(title="旅遊小管家 Pro（按鈕錄音版）", css=CSS_TECH) as demo:
+with gr.Blocks(title="旅遊小管家 Pro（按鈕錄音版 Fixed）", css=CSS_TECH) as demo:
     gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>按一下開始錄音 → 再按一下停止並送出</span>")
     with gr.Row(equal_height=True):
-        # 左：聊天
         with gr.Column(scale=3, elem_classes=["neon-panel"]):
             chatbot = gr.Chatbot(label="對話區", height=520)
             history_state = gr.State([])
@@ -248,17 +245,13 @@ with gr.Blocks(title="旅遊小管家 Pro（按鈕錄音版）", css=CSS_TECH) a
                 export_btn = gr.Button("📝 匯出對話（.txt）")
                 export_file = gr.File(label="下載檔案", visible=True)
 
-        # 右：語音 & 設定
         with gr.Column(scale=2, elem_classes=["neon-panel"]):
             gr.Markdown("### 🎤 語音直送（按鈕控制）")
-
-            # 錄音控制與狀態
             with gr.Row():
                 start_btn = gr.Button("🎙️ 開始錄音", elem_classes=["primary"])
                 stop_send_btn = gr.Button("⏹️ 停止並送出")
             mic_status = gr.Textbox(value="尚未錄音", label="狀態", interactive=False)
 
-            # 由 JS 送來的 dataURL（隱藏）
             audio_dataurl_box = gr.Textbox(visible=False)
 
             gr.Markdown("---")
@@ -267,21 +260,20 @@ with gr.Blocks(title="旅遊小管家 Pro（按鈕錄音版）", css=CSS_TECH) a
             whisper_lang_dd = gr.Dropdown(choices=LANG_CHOICES, value="auto", label="Whisper 語言")
             system_prompt_tb = gr.Textbox(value=DEFAULT_SYSTEM_PROMPT, label="System Prompt（系統提示詞）", lines=3)
 
-    # 事件：文字聊天
+    # 文字聊天
     send_btn.click(on_send_text, [user_text, history_state, voice_dropdown, system_prompt_tb],
                    [chatbot, history_state, user_text, tts_output, latest_text, error_box])
     clear_btn.click(clear_history_both, None, [chatbot, history_state])
 
-    # 事件：開始錄音（純前端）
-    start_btn.click(lambda: ("錄音中...", None), None, [mic_status, audio_dataurl_box], _js=JS_START_RECORD)
+    # 前端：開始錄音（只更新狀態文本）
+    start_btn.click(lambda: "錄音中...", None, [mic_status], _js=JS_START_RECORD)
 
-    # 事件：停止並送出（前端停止並傳 dataURL → 後端轉文字/聊天/TTS）
+    # 前端：停止並送出（JS 只回傳 dataURL 作為第一個輸入）
     stop_send_btn.click(on_audio_dataurl_received,
                         [audio_dataurl_box, history_state, voice_dropdown, system_prompt_tb, whisper_lang_dd],
                         [chatbot, history_state, tts_output, mic_status],
                         _js=JS_STOP_AND_EXPORT)
 
-    # 匯出
     export_btn.click(export_chat, [history_state], [export_file])
 
 # -------------------------
