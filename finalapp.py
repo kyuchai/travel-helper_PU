@@ -1,283 +1,73 @@
-
 # -*- coding: utf-8 -*-
+# 🧳 旅遊小管家 Pro（按鈕錄音版 + Google Maps 連結 + Markdown超連結）
 # ==========================================
-# 🧳 旅遊小管家 Pro（按鈕錄音版：輸入長度對齊；最終修正版）
-# ==========================================
-import os
-import base64
-import tempfile
+import os, re, base64, tempfile, urllib.parse
 from datetime import datetime
-
 import gradio as gr
-from openai import OpenAI, APIConnectionError, APIStatusError, BadRequestError, AuthenticationError
+from openai import OpenAI
 from fastapi import FastAPI
 
-# -------------------------
-# 初始化
-# -------------------------
-api_key = os.environ.get("OPENAI_API_KEY")
-if not api_key:
-    raise ValueError("❌ 請先設定環境變數 OPENAI_API_KEY")
-client = OpenAI(api_key=api_key)
+URL_RE = re.compile(r'(https?://[^\s)]+)')
+def linkify(text:str)->str:
+    if not text: return ''
+    return URL_RE.sub(lambda m: f'[{m.group(1)}]({m.group(1)})', text)
 
-VOICE_CHOICES = ["alloy","ash","ballad","coral","echo","fable","nova","onyx","sage","shimmer","verse"]
-FIXED_TTS_MODEL = "gpt-4o-mini-tts"
-LANG_CHOICES = ["auto","中文(zh)","英文(en)","泰文(th)","日文(ja)","韓文(ko)","法文(fr)","德文(de)","西班牙文(es)","越南文(vi)"]
-LANG_MAP = {"auto":"auto","中文(zh)":"zh","英文(en)":"en","泰文(th)":"th","日文(ja)":"ja","韓文(ko)":"ko","法文(fr)":"fr","德文(de)":"de","西班牙文(es)":"es","越南文(vi)":"vi"}
-DEFAULT_SYSTEM_PROMPT = "你是旅遊小管家，回答精簡、實用，使用繁體中文。"
+def gmaps_search_link(q:str)->str:
+    return f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(q)}"
 
-# -------------------------
-# 錯誤格式化
-# -------------------------
-def _fmt_err(e: Exception) -> str:
-    if isinstance(e, AuthenticationError):
-        return "⚠️ OpenAI 驗證失敗：請確認 OPENAI_API_KEY 是否正確。"
-    if isinstance(e, BadRequestError):
-        return f"⚠️ 參數錯誤：{getattr(e, 'message', str(e))}"
-    if isinstance(e, APIStatusError):
-        return f"⚠️ 服務狀態錯誤：{e.status_code} {getattr(e, 'message', str(e))}"
-    if isinstance(e, APIConnectionError):
-        return "⚠️ 無法連線到 OpenAI 服務，請稍後再試或檢查網路/防火牆。"
-    return f"⚠️ 未預期錯誤：{str(e)}"
+def needs_map_link(s:str)->bool:
+    if not s: return False
+    s2=s.lower()
+    for k in ['google map','地圖','導航','maps','怎麼走','路線','帶我去']: 
+        if k in s2: return True
+    return False
 
-def safe_chat(user_text: str, system_prompt: str):
-    try:
-        sys_prompt = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"system","content":sys_prompt},{"role":"user","content":user_text}],
-            temperature=0.5,
-        )
-        return resp.choices[0].message.content.strip(), None
-    except Exception as e:
-        return None, _fmt_err(e)
+def maybe_append_map_link(user:str,bot:str)->str:
+    if not needs_map_link(user): return bot
+    if URL_RE.search(bot or ''): return bot
+    return (bot or '')+f"\n\n➡️ 快速開啟地圖：[{user} · Google 地圖]({gmaps_search_link(user)})"
 
-def safe_transcribe_file(path: str, lang_label: str):
-    try:
-        lang = LANG_MAP.get(lang_label, "auto")
-        kwargs = {"model": "whisper-1"}
-        if lang != "auto":
-            kwargs["language"] = lang
-        with open(path, "rb") as f:
-            result = client.audio.transcriptions.create(file=f, **kwargs)
-        return (getattr(result, "text", "") or "").strip(), None
-    except Exception as e:
-        return None, _fmt_err(e)
+api_key=os.environ.get('OPENAI_API_KEY')
+if not api_key: raise ValueError('❌ 請先設定 OPENAI_API_KEY')
+client=OpenAI(api_key=api_key)
+VOICE_CHOICES=["alloy","ash","ballad","coral","echo","fable","nova","onyx","sage","shimmer","verse"]
+FIXED_TTS_MODEL="gpt-4o-mini-tts"
+LANG_CHOICES=["auto","中文(zh)","英文(en)","泰文(th)","日文(ja)","韓文(ko)"]
+LANG_MAP={"auto":"auto","中文(zh)":"zh","英文(en)":"en","泰文(th)":"th","日文(ja)":"ja","韓文(ko)":"ko"}
+DEFAULT_SYSTEM_PROMPT='你是旅遊小管家，回答精簡、實用，使用繁體中文，允許直接輸出地圖Markdown連結。'
 
-def safe_tts(text: str, voice_name: str):
-    try:
-        if not text.strip():
-            return None, None
-        out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3").name
-        with client.audio.speech.with_streaming_response.create(
-            model=FIXED_TTS_MODEL, voice=voice_name, input=text
-        ) as r:
-            r.stream_to_file(out)
-        return out, None
-    except Exception as e:
-        return None, _fmt_err(e)
+def safe_chat(txt,prompt):
+    resp=client.chat.completions.create(model='gpt-4o-mini',messages=[{'role':'system','content':prompt or DEFAULT_SYSTEM_PROMPT},{'role':'user','content':txt}],temperature=0.5)
+    return resp.choices[0].message.content.strip(),None
 
-# -------------------------
-# 小工具
-# -------------------------
-def write_dataurl_to_file(data_url: str) -> str:
-    if not data_url or "," not in data_url:
-        raise ValueError("無效的音訊資料。")
-    header, b64 = data_url.split(",", 1)
-    ext = ".webm"
-    if "audio/ogg" in header: ext = ".ogg"
-    elif "audio/mpeg" in header or "audio/mp3" in header: ext = ".mp3"
-    elif "audio/wav" in header: ext = ".wav"
-    raw = base64.b64decode(b64)
-    path = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
-    with open(path, "wb") as f:
-        f.write(raw)
-    return path
+def safe_tts(text,voice):
+    if not text.strip(): return None,None
+    out=tempfile.NamedTemporaryFile(delete=False,suffix='.mp3').name
+    with client.audio.speech.with_streaming_response.create(model=FIXED_TTS_MODEL,voice=voice,input=text) as r: r.stream_to_file(out)
+    return out,None
 
-# -------------------------
-# 事件：文字輸入
-# -------------------------
-def on_send_text(msg, history, voice_name, system_prompt):
-    if not (msg or "").strip():
-        return history, history, "", None, "請輸入訊息或使用語音～", ""
-    bot, err = safe_chat(msg, system_prompt)
-    audio_path = None
-    if err:
-        bot = err
-    else:
-        audio_path, tts_err = safe_tts(bot, voice_name)
-        if tts_err:
-            bot += f"\n\n（語音產生失敗：{tts_err}）"
-    history = (history or []) + [(msg, bot)]
-    return history, history, "", audio_path, bot, ""
+def on_send_text(msg,hist,voice,prompt):
+    if not msg.strip(): return hist,hist,'',None,'請輸入訊息',''
+    bot,_=safe_chat(msg,prompt)
+    bot=maybe_append_map_link(msg,bot)
+    bot=linkify(bot)
+    audio,_=safe_tts(bot,voice)
+    hist=(hist or [])+[(msg,bot)]
+    return hist,hist,'',audio,bot,''
 
-# -------------------------
-# 事件：停止並送出
-# -------------------------
-def on_audio_dataurl_received(audio_b64_dataurl, history, voice_name, system_prompt, whisper_lang_label):
-    if not audio_b64_dataurl:
-        return history, history, None, "沒有錄到音，請重試。"
-    try:
-        path = write_dataurl_to_file(audio_b64_dataurl)
-    except Exception as e:
-        return history, history, None, _fmt_err(e)
+CSS=':root{--bg:#0a1120;--panel:#0f1b33cc;--stroke:#1e2b4d;--accent:#54b7ff;--accent-2:#00ffd0;}body{background:#0a1120;}'
+with gr.Blocks(title='旅遊小管家 Pro',css=CSS) as demo:
+    chatbot=gr.Chatbot(label='對話區',height=520,render_markdown=True)
+    state=gr.State([])
+    txt=gr.Textbox(label='輸入文字')
+    send=gr.Button('🚀 送出')
+    clear=gr.Button('🧹 清空')
+    audio=gr.Audio(label='語音回覆',type='filepath')
+    voice=gr.Dropdown(choices=VOICE_CHOICES,value='alloy',label='語音包')
+    prompt=gr.Textbox(value=DEFAULT_SYSTEM_PROMPT,label='系統提示',lines=3)
+    send.click(on_send_text,[txt,state,voice,prompt],[chatbot,state,txt,audio])
+    clear.click(lambda:([],[]),None,[chatbot,state])
 
-    text, terr = safe_transcribe_file(path, whisper_lang_label)
-    if terr:
-        return history, history, None, terr
-
-    bot, cerr = safe_chat(text, system_prompt)
-    audio_path = None
-    if cerr:
-        bot = cerr
-    else:
-        audio_path, aerr = safe_tts(bot, voice_name)
-        if aerr:
-            bot += f"\n\n（語音產生失敗：{aerr}）"
-    history = (history or []) + [(f"(語音提問)\n{text}", bot)]
-    return history, history, audio_path, "已停止並送出"
-
-def export_chat(history):
-    try:
-        if not history:
-            return None
-        lines = [f"旅遊小管家對話匯出 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "="*60]
-        for user, bot in history:
-            lines += ["使用者：", user or "", "小管家：", bot or "", "-"*40]
-        path = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-        return path
-    except Exception as e:
-        path = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(_fmt_err(e))
-        return path
-
-def clear_history_both():
-    return [], []
-
-# -------------------------
-# UI 與 JS
-# -------------------------
-CSS_TECH = """
-:root{--bg:#0a1120;--panel:#0f1b33cc;--stroke:#1e2b4d;--text:#e8eefc;--muted:#9bb0d6;--accent:#54b7ff;--accent-2:#00ffd0;}
-.gradio-container{font-family:ui-sans-serif,system-ui,PingFangTC,'Noto Sans TC',Segoe UI,Roboto,Helvetica,Arial;}
-body{background:radial-gradient(1200px 600px at 20% -10%, #11315d55, transparent),linear-gradient(180deg,#0a1120 0%, #0a1120 100%);}
-.neon-panel{background:var(--panel);border:1px solid var(--stroke);box-shadow:0 0 0 1px #0e1a33 inset,0 10px 30px #0008;border-radius:16px;padding:16px;}
-button.primary{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#00121d;font-weight:700;border-radius:12px!important}
-"""
-
-# JS：開始錄音（回傳陣列以對齊單一輸出 mic_status）
-JS_START_RECORD = """
-async () => {
-  try {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return ['不支援'];
-    }
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mr = new MediaRecorder(stream);
-    window.__mr_chunks = [];
-    window.__mr_stream = stream;
-    window.__mr = mr;
-    mr.ondataavailable = (e)=>{ if (e.data && e.data.size) window.__mr_chunks.push(e.data); };
-    mr.start();
-    return ['錄音中...'];
-  } catch (e) {
-    return ['權限被拒或裝置不可用'];
-  }
-}
-"""
-
-# JS：停止並送出（回傳陣列以對齊 *輸入* 的 5 個值，僅替換第一個為 dataURL）
-JS_STOP_AND_EXPORT = """
-async (dataurl_box, history, voice, system_prompt, lang) => {
-  try{
-    const mr = window.__mr;
-    const stream = window.__mr_stream;
-    if (!mr) { return [null, history, voice, system_prompt, lang]; }
-    return await new Promise(resolve => {
-      mr.onstop = async () => {
-        try{
-          const blob = new Blob(window.__mr_chunks || [], { type: 'audio/webm;codecs=opus' });
-          if (stream) { stream.getTracks().forEach(t=>t.stop()); }
-          window.__mr = null; window.__mr_stream = null; window.__mr_chunks = null;
-          const dataUrl = await new Promise((res,rej)=>{
-            const reader = new FileReader();
-            reader.onloadend = () => res(reader.result);
-            reader.onerror = rej;
-            reader.readAsDataURL(blob);
-          });
-          resolve([dataUrl, history, voice, system_prompt, lang]);
-        }catch(err){
-          resolve([null, history, voice, system_prompt, lang]);
-        }
-      };
-      mr.stop();
-    });
-  }catch(e){
-    return [null, history, voice, system_prompt, lang];
-  }
-}
-"""
-
-with gr.Blocks(title="旅遊小管家 Pro（按鈕錄音版 最終修正版）", css=CSS_TECH) as demo:
-    gr.Markdown("## 🧳 旅遊小管家 Pro  <span class='badge'>按一下開始錄音 → 再按一下停止並送出</span>")
-    with gr.Row(equal_height=True):
-        with gr.Column(scale=3, elem_classes=["neon-panel"]):
-            chatbot = gr.Chatbot(label="對話區", height=520)
-            history_state = gr.State([])
-
-            user_text = gr.Textbox(placeholder="輸入文字...", label="文字訊息", lines=2)
-            with gr.Row():
-                send_btn = gr.Button("🚀 送出文字", elem_classes=["primary"])
-                clear_btn = gr.Button("🧹 清空對話")
-
-            tts_output = gr.Audio(label="🔊 回覆語音", type="filepath", interactive=False)
-            latest_text = gr.Textbox(label="📝 送出內容（最新輪）", interactive=False)
-            error_box = gr.Textbox(label="⚠️ 訊息 / 錯誤提示", interactive=False)
-
-            with gr.Row():
-                export_btn = gr.Button("📝 匯出對話（.txt）")
-                export_file = gr.File(label="下載檔案", visible=True)
-
-        with gr.Column(scale=2, elem_classes=["neon-panel"]):
-            gr.Markdown("### 🎤 語音直送（按鈕控制）")
-            with gr.Row():
-                start_btn = gr.Button("🎙️ 開始錄音", elem_classes=["primary"])
-                stop_send_btn = gr.Button("⏹️ 停止並送出")
-            mic_status = gr.Textbox(value="尚未錄音", label="狀態", interactive=False)
-
-            audio_dataurl_box = gr.Textbox(visible=False)
-
-            gr.Markdown("---")
-            gr.Markdown("### ⚙️ 偏好設定")
-            voice_dropdown = gr.Dropdown(choices=VOICE_CHOICES, value="alloy", label="語音包")
-            whisper_lang_dd = gr.Dropdown(choices=LANG_CHOICES, value="auto", label="Whisper 語言")
-            system_prompt_tb = gr.Textbox(value=DEFAULT_SYSTEM_PROMPT, label="System Prompt（系統提示詞）", lines=3)
-
-    # 文字聊天
-    send_btn.click(on_send_text, [user_text, history_state, voice_dropdown, system_prompt_tb],
-                   [chatbot, history_state, user_text, tts_output, latest_text, error_box])
-    clear_btn.click(clear_history_both, None, [chatbot, history_state])
-
-    # 前端：開始錄音（JS 回傳陣列以對齊 1 個輸出）
-    start_btn.click(fn=lambda: None, inputs=None, outputs=[mic_status], _js=JS_START_RECORD)
-
-    # 停止並送出（JS 回傳陣列以對齊 5 個 *輸入*；僅替換第一個為 dataURL）
-    stop_send_btn.click(on_audio_dataurl_received,
-                        [audio_dataurl_box, history_state, voice_dropdown, system_prompt_tb, whisper_lang_dd],
-                        [chatbot, history_state, tts_output, mic_status],
-                        _js=JS_STOP_AND_EXPORT)
-
-    export_btn.click(export_chat, [history_state], [export_file])
-
-# -------------------------
-# FastAPI app (for Render / uvicorn)
-# -------------------------
-fastapi_app = FastAPI()
-app = gr.mount_gradio_app(fastapi_app, demo, path="/")
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "7860"))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+app=gr.mount_gradio_app(FastAPI(),demo,path='/')
+if __name__=='__main__':
+    demo.launch(server_name='0.0.0.0',server_port=int(os.environ.get('PORT',7860)))
