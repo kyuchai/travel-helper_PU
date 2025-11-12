@@ -1,12 +1,13 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# 🎤 旅遊語音小管家（可正常開啟 Google Maps 超連結 · 科技風 UI）
+# 🎤 旅遊語音小管家（外部連結 OK · 科技風 UI · System Prompt 預設摺疊）
 # ==========================================
 # - 「開始錄音」→「停止並送出」
 # - Whisper 轉文字 → GPT 回答 → GPT TTS 語音回覆
 # - 自動偵測地圖/導航需求，補上 Google Maps 外部連結（HTML <a>，target=_blank）
 # - Chatbot 使用 render_markdown=False（直接渲染 HTML），避免被 Render 路由吃掉
+# - System Prompt 以 Accordion 預設摺疊
 # - 相容 Gradio 3.41（事件 I/O 與 _js 回傳值對齊）
 # ==========================================
 
@@ -156,7 +157,7 @@ def on_send_text(msg, history, voice_name, system_prompt):
         bot = html_linkify(bot)
         audio_path, tts_err = safe_tts(bot, voice_name)
         if tts_err:
-            bot += f"\\n\\n（語音產生失敗：{tts_err}）"
+            bot += f"\n\n（語音產生失敗：{tts_err}）"
     history = (history or []) + [(msg, bot)]
     return history, history, "", audio_path, bot, ""
 
@@ -184,8 +185,8 @@ def on_audio_dataurl_received(audio_b64_dataurl, history, voice_name, system_pro
         bot = html_linkify(bot)
         audio_path, aerr = safe_tts(bot, voice_name)
         if aerr:
-            bot += f"\\n\\n（語音產生失敗：{aerr}）"
-    history = (history or []) + [(f"(語音提問)\\n{text}", bot)]
+            bot += f"\n\n（語音產生失敗：{aerr}）"
+    history = (history or []) + [(f"(語音提問)\n{text}", bot)]
     return history, history, audio_path, "已停止並送出"
 
 def export_chat(history):
@@ -194,7 +195,7 @@ def export_chat(history):
         lines += ["使用者：", user or "", "小管家：", bot or "", "-"*40]
     path = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
     with open(path, "w", encoding="utf-8") as f:
-        f.write("\\n".join(lines))
+        f.write("\n".join(lines))
     return path
 
 def clear_history_both():
@@ -293,11 +294,13 @@ with gr.Blocks(title="旅遊語音小管家", css=CSS_TECH) as demo:
                 stop_send_btn = gr.Button("⏹️ 停止並送出")
             mic_status = gr.Textbox(value="尚未錄音", label="狀態", interactive=False)
             audio_dataurl_box = gr.Textbox(visible=False)
+
             gr.Markdown("---")
             gr.Markdown("### ⚙️ 偏好設定")
             voice_dropdown = gr.Dropdown(choices=VOICE_CHOICES, value="alloy", label="語音包（GPT TTS）")
             whisper_lang_dd = gr.Dropdown(choices=LANG_CHOICES, value="auto", label="Whisper 語言")
-            system_prompt_tb = gr.Textbox(value=DEFAULT_SYSTEM_PROMPT, label="System Prompt（系統提示詞）", lines=4)
+            with gr.Accordion("🔒 系統提示詞（開發者設定）", open=False):
+                system_prompt_tb = gr.Textbox(value=DEFAULT_SYSTEM_PROMPT, label="System Prompt（系統提示詞）", lines=4)
 
     # 綁定事件
     send_btn.click(on_send_text, [user_text, history_state, voice_dropdown, system_prompt_tb],
