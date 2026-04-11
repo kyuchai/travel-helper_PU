@@ -209,7 +209,7 @@ def on_send_text(msg, history, voice, system_prompt, user_age, tone_style):
         if aerr:
             bot += f"\n\n（語音播放產生失敗：{aerr}）"
 
-    history = (history or []) + [(msg, bot)]
+    history = (history or []) + [{"role": "user", "content": msg}, {"role": "assistant", "content": bot}]
     # 回傳：chatbot, state, 清空 user, tts_path, 最新回答, STT結果清空, 錯誤訊息清空
     return history, history, "", audio_path, bot, "", ""
 
@@ -242,7 +242,9 @@ def on_audio_dataurl_received(audio_b64, history, voice, system_prompt, lang_lab
         if aerr:
             bot += f"\n\n（語音播放產生失敗：{aerr}）"
 
-    history = (history or []) + [(f"(語音)\n{text}", bot)]
+    # 轉換為 Gradio 6.x 格式
+    new_message = [{"role": "user", "content": f"(語音)\n{text}"}, {"role": "assistant", "content": bot}]
+    history = (history or []) + new_message
     # 回傳：chatbot, state, tts_path, 錄音狀態, STT結果顯示, 錯誤訊息清空
     return history, history, audio_path, "已停止並送出", text, ""
 
@@ -251,8 +253,14 @@ def on_audio_dataurl_received(audio_b64, history, voice, system_prompt, lang_lab
 # -------------------------
 def export_chat(history):
     lines = ["旅遊語音小管家 對話匯出", "="*60]
-    for u,b in (history or []):
-        lines += ["使用者：", u or "", "小管家：", b or "", "-"*40]
+    for msg in (history or []):
+        if isinstance(msg, dict):
+            role = "使用者" if msg.get("role") == "user" else "小管家"
+            content = msg.get("content", "")
+            lines += [f"{role}：", content, "-"*40]
+        else:
+            u, b = msg
+            lines += ["使用者：", u or "", "小管家：", b or "", "-"*40]
     path = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
     with open(path,"w",encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -424,7 +432,6 @@ with gr.Blocks(
                 chatbot = gr.Chatbot(
                     label="對話區",
                     height=520,
-                    render_markdown=False,
                 )
                 state = gr.State([])
 
@@ -448,7 +455,7 @@ with gr.Blocks(
                     exp_file = gr.File(label="下載檔案", visible=True)
 
             # 右側：語音與設定
-            with gr.Column(scale=2, elem_classes=["neon-panel"]):
+            with gr.Column(scale=2, elem_classes=["neon-panel"], visible=False):
                 gr.Markdown("### 🎙️ 語音輸入（按鈕控制）")
 
                 with gr.Row():
@@ -511,17 +518,15 @@ with gr.Blocks(
     example_btn.click(fill_example, None, user)
 
     start.click(
-        fn=lambda: None,
+        fn=lambda: "錄音功能暫時不可用，請使用文字輸入",
         inputs=None,
         outputs=[mic],
-        js=JS_START_RECORD,
     )
 
     stop.click(
-        on_audio_dataurl_received,
-        [audiobox, state, voice, sys_tb, lang, user_age, tone_style],
-        [chatbot, state, tts, mic, stt_result, errbox],
-        js=JS_STOP_AND_EXPORT,
+        fn=lambda a,b,c,d,e,f,g: (b,c,None,"錄音功能暫時不可用", "", "請使用文字輸入"),
+        inputs=[audiobox, state, voice, sys_tb, lang, user_age, tone_style],
+        outputs=[chatbot, state, tts, mic, stt_result, errbox],
     )
 
     export.click(export_chat, [state], [exp_file])
@@ -536,6 +541,6 @@ fastapi_app = FastAPI()
 app = gr.mount_gradio_app(fastapi_app, demo, path="/")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "7860"))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    port = int(os.environ.get("PORT", "7861"))
+    demo.launch(server_name="127.0.0.1", server_port=port)
 
