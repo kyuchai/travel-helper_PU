@@ -543,4 +543,12 @@ app = gr.mount_gradio_app(fastapi_app, demo, path="/")
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "7861"))
     demo.launch(server_name="127.0.0.1", server_port=port)
+# 取得 Render 提供給你的 Port，如果沒有則預設 10000
+port = int(os.environ.get("PORT", 10000))
 
+# server_name 必須是 "0.0.0.0"
+demo.launch(
+    server_name="0.0.0.0", 
+    server_port=port,
+    allowed_paths=["/"] # 如果有用到圖片或檔案，建議加上這行
+)
