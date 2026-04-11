@@ -537,18 +537,17 @@ with gr.Blocks(
 # -------------------------
 # 🚪 FastAPI mount（給 Render / uvicorn 用）
 # -------------------------
-fastapi_app = FastAPI()
-app = gr.mount_gradio_app(fastapi_app, demo, path="/")
-
+# -------------------------
+# 🚪 啟動設定（針對 Render 優化）
+# -------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "7861"))
-    demo.launch(server_name="127.0.0.1", server_port=port)
-# 取得 Render 提供給你的 Port，如果沒有則預設 10000
-port = int(os.environ.get("PORT", 10000))
-
-# server_name 必須是 "0.0.0.0"
-demo.launch(
-    server_name="0.0.0.0", 
-    server_port=port,
-    allowed_paths=["/"] # 如果有用到圖片或檔案，建議加上這行
-)
+    # 1. 取得 Render 自動分配的 Port
+    port = int(os.environ.get("PORT", 10000))
+    
+    # 2. 啟動 Gradio (直接啟動即可，無需額外 mount FastAPI)
+    demo.launch(
+        server_name="0.0.0.0", 
+        server_port=port,
+        share=False,          # 雲端環境必須關閉 share
+        allowed_paths=["/"]    # 允許存取暫存音訊檔
+    )
