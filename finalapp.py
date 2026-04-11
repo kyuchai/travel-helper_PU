@@ -383,10 +383,9 @@ def fill_example():
 # -------------------------
 # 🧱 Gradio 介面
 # -------------------------
-with gr.Blocks(
-    title="旅遊語音小管家",
-    css=CSS_TECH + CSS_ELDER,
-) as demo:
+# 原本：with gr.Blocks(title="...", css=CSS_TECH + CSS_ELDER) as demo:
+# 修改為：
+with gr.Blocks(title="旅遊語音小管家") as demo:
 
     # 首次載入顯示一次提醒（使用 localStorage 記錄）
     gr.HTML(
@@ -541,13 +540,13 @@ with gr.Blocks(
 # 🚪 啟動設定（針對 Render 優化）
 # -------------------------
 if __name__ == "__main__":
-    # 取得 Render 分配的 Port
     port = int(os.environ.get("PORT", 10000))
     
     demo.launch(
         server_name="0.0.0.0", 
         server_port=port,
         share=False,
-        show_api=False,    # <--- 重要：關閉 API 文檔生成，繞過報錯點
+        # 將 CSS 移到這裡 (Gradio 6.0+ 要求)
+        css=CSS_TECH + CSS_ELDER, 
         allowed_paths=["/"]
     )
