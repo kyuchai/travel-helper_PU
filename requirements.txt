@@ -1,7 +1,6 @@
-gradio==4.44.1
-gradio_client==1.3.0
-openai>=1.40.0,<2.0.0
-numpy<2.0.0
-huggingface-hub<0.27.0
+gradio>=5.0.0
+openai
+numpy
+huggingface-hub
 python-multipart
-pydantic<2.0
+pydantic
