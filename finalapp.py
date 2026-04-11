@@ -541,12 +541,13 @@ with gr.Blocks(
 # 🚪 啟動設定（針對 Render 優化）
 # -------------------------
 if __name__ == "__main__":
+    # 取得 Render 分配的 Port
     port = int(os.environ.get("PORT", 10000))
     
     demo.launch(
         server_name="0.0.0.0", 
         server_port=port,
         share=False,
-        show_api=False,   # <--- 新增這一行，關閉 API 文檔生成，徹底避開報錯位置
+        show_api=False,    # <--- 重要：關閉 API 文檔生成，繞過報錯點
         allowed_paths=["/"]
     )
