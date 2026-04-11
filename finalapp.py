@@ -541,13 +541,12 @@ with gr.Blocks(
 # 🚪 啟動設定（針對 Render 優化）
 # -------------------------
 if __name__ == "__main__":
-    # 1. 取得 Render 自動分配的 Port
     port = int(os.environ.get("PORT", 10000))
     
-    # 2. 啟動 Gradio (直接啟動即可，無需額外 mount FastAPI)
     demo.launch(
         server_name="0.0.0.0", 
         server_port=port,
-        share=False,          # 雲端環境必須關閉 share
-        allowed_paths=["/"]    # 允許存取暫存音訊檔
+        share=False,
+        show_api=False,   # <--- 新增這一行，關閉 API 文檔生成，徹底避開報錯位置
+        allowed_paths=["/"]
     )
